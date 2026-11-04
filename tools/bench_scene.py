@@ -26,8 +26,9 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-FONT = Path(r"E:\zx\esp\wc-improved\source\plugins\txthex_viewer_VDAC2\fonts\NotoSansMono-Regular.ttf")
-CURSOR = Path(r"E:\zx\Zuna-Deluxe-VDAC2-FT812\Graphics\Original\cursor.png")
+DESIGN = Path(__file__).resolve().parents[1] / "design"
+FONT = DESIGN / "fonts" / "NotoSansMono-Regular.ttf"           # копия шрифта TXTVIEW2
+CURSOR = DESIGN / "zuma_cursor" / "cursor.png"                 # курсор Zuma Deluxe (make_cursor.py)
 PHOTO = Path(r"E:\zx\Tang Nano 20k VDAC\VDAC4\Tang Nano 20k\FTVIEW4\artykan0.jpg")
 ICONS = Path(__file__).resolve().parents[1] / "design" / "icons"
 

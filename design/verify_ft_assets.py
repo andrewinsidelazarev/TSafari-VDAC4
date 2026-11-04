@@ -114,7 +114,7 @@ def main():
     check(build.pack_l4(sample)==bytes.fromhex("01 23 45 67 89 AB CD EF"),"Эталон L4: старшая тетрада слева")
     sample=Image.new("RGBA",(1,1),(0x12,0x34,0x56,0x78))
     check(build.pack_argb4(sample)==bytes.fromhex("35 71"),"Эталон ARGB4: A4R4G4B4 little-endian")
-    zuma=Path(r"E:\zx\Zuna-Deluxe-VDAC2-FT812\Graphics\Converted\cursor_p00.bin").read_bytes()
+    zuma=(ROOT/"zuma_cursor/cursor_p00.bin").read_bytes()   # ресурс FT812 Zuma Deluxe (make_cursor.py)
     check((ROOT/"ft/cursor_zuma.argb4").read_bytes()==zuma[:2888],"Курсор совпадает с 2888 байтами оригинального FT812-ресурса Zuma")
 
     ranges=[(a["ram_g"],a["ram_g"]+a["bytes"],a["name"]) for a in manifest["assets"] if a["canonical"]]

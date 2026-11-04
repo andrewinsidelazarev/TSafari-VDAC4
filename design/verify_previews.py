@@ -30,13 +30,16 @@ for item in manifest["icons"]:
     if item["file"]!="cursor_zuma.png":
         check(all(v%17==0 for v in im.getchannel("A").get_flattened_data()),f"Альфа 4 бита: {item['file']}")
 
+# Курсор — с оригиналом в проекте (design/zuma_cursor, его делает make_cursor.py из arrow1.png
+# Zuma Deluxe); шрифт — с исходником TXTVIEW2, если он есть на этом ПК.
 sources={
-    "icons/cursor_zuma.png":r"E:\zx\Zuna-Deluxe-VDAC2-FT812\Graphics\Original\cursor.png",
-    "fonts/NotoSansMono-Regular.ttf":r"E:\zx\esp\wc-improved\source\plugins\txthex_viewer_VDAC2\fonts\NotoSansMono-Regular.ttf",
-    "fonts/OFL.txt":r"E:\zx\esp\wc-improved\source\plugins\txthex_viewer_VDAC2\fonts\OFL.txt",
+    "icons/cursor_zuma.png":ROOT/"zuma_cursor/cursor.png",
+    "fonts/NotoSansMono-Regular.ttf":Path(r"E:\zx\esp\wc-improved\source\plugins\txthex_viewer_VDAC2\fonts\NotoSansMono-Regular.ttf"),
+    "fonts/OFL.txt":Path(r"E:\zx\esp\wc-improved\source\plugins\txthex_viewer_VDAC2\fonts\OFL.txt"),
 }
 for dest,src in sources.items():
-    check((ROOT/dest).read_bytes()==Path(src).read_bytes(),f"Побайтовое совпадение с исходником: {dest}")
+    if src.exists():
+        check((ROOT/dest).read_bytes()==src.read_bytes(),f"Побайтовое совпадение с исходником: {dest}")
 
 # Независимый эталон по TXTVIEW2: общая baseline=26; отдельные ячейки 12x34.
 ft=ImageFont.truetype(str(ROOT/"fonts/NotoSansMono-Regular.ttf"),20)
