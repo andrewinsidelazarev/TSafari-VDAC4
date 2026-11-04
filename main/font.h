@@ -22,6 +22,19 @@
 #define FONT_GLYPH_BYTES (FONT_CELL_W / 2 * FONT_CELL_H)   /* 6 байт строки × 34 строки */
 #define FONT_NONE 0xFFFFu                                  /* «такого глифа нет» */
 
+/* НАЧЕРТАНИЯ (размеры шрифта) — по дизайну Codex: основной текст 20 px и ещё пять. У каждого
+ * своя клетка: ширина (она же шаг — шрифт моноширинный), высота и базовая линия. Номера глифов
+ * у всех одни и те же (основного атласа); в дополнительных начертаниях есть только частые знаки
+ * (font_sub_glyphs), остальные рисуются основным. */
+enum { FACE_BODY, FACE_H1, FACE_H2, FACE_H3, FACE_SMALL, FACE_CAPTION, FACE_COUNT };
+typedef struct {
+    uint8_t w, h, baseline, stride;      /* клетка, базовая линия, байт в строке точек */
+    const uint8_t *zlib;                 /* сжатый атлас (у основного — NULL: он свой) */
+    uint32_t zlib_bytes, bytes;
+} font_face_t;
+extern const font_face_t font_faces[FACE_COUNT];
+extern const uint16_t font_sub_glyphs[FONT_SUB_GLYPHS];
+
 /* Таблицы из font_data.c (тоже от gen_font.py):
  *   font_codes   — коды Unicode, у которых есть глиф, по возрастанию; номер в таблице = номер глифа;
  *   font_compose — тройки «глиф буквы, код знака, готовый глиф» (е + ◌̈ = ё), по возрастанию;
@@ -36,6 +49,9 @@ extern const uint8_t font_l4_zlib[FONT_L4_ZLIB_BYTES];
 int font_init(void);
 /* Точки глифа: FONT_CELL_H строк по 6 байт, левая точка — старшая тетрада (4 бита). */
 const uint8_t *font_glyph(unsigned glyph);
+/* Точки глифа в начертании face (font_faces[face].h строк по stride байт); FACE_BODY — как
+ * font_glyph. Знака в этом начертании нет (или нет памяти) — NULL: рисовать основным. */
+const uint8_t *font_glyph_face(unsigned face, unsigned glyph);
 /* Номер глифа для кода Unicode; нет в шрифте — FONT_REPLACEMENT (знак «�»). */
 unsigned font_lookup(uint32_t code);
 /* Готовая буква «глиф + надстрочный знак» (например, е + ◌̈ = ё) или FONT_NONE. */

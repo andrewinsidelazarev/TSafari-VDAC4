@@ -30,6 +30,8 @@
 #include "download.h"
 #include "charset.h"
 #include "html.h"
+#include "form.h"
+#include "image.h"
 #include "url.h"
 #include "ui_design.h"
 
@@ -63,7 +65,11 @@ static int frame(void) {
     /* под окном Wi-Fi — пустой фон бумаги, страницы ещё нет (DESIGN.md) */
     dl_put(dl, dl_clear_color(ui_wifi_open() ? TSA_UI_COLOR_PAPER_RGB888 : page_bg()));
     dl_put(dl, dl_clear());
-    if (!ui_wifi_open()) page_dl(dl);
+    if (!ui_wifi_open()) {
+        page_dl(dl);
+        image_dl(dl, page_top());                    /* картинки — отдельными битмапами поверх страницы */
+        form_dl(dl, page_top());                     /* каретка поля и раскрытый список */
+    }
     ui_dl(dl);
     dl_put(dl, dl_display());
     if (dl->overflow) { ts_log("tsafari: display list overflow"); return 1; }
@@ -151,6 +157,23 @@ static int nx_at;                        /* какой фрейм nx сейча�
 static int nx_focus;                     /* куда прокрутить потом: фрейм; −1 — к началу; −2 — где был */
 static int nx_expand;                    /* сколько фреймов уже оказались сами наборами фреймов */
 
+/* Картинки (image.h): грузятся по одной, когда страница уже на экране. Пришла картинка, размер
+ * которой в HTML не задан, — страницу пора разложить заново (relayout_at); для этого тело
+ * обычной страницы хранится (page_body), у фреймов — их тела в fr[]. */
+static int img_busy;                     /* идёт загрузка картинки img_url */
+static char img_url[URL_MAX];
+static uint32_t relayout_at;             /* когда разложить страницу заново; 0 — не нужно */
+static uint8_t *page_body;               /* тело страницы на экране (для переразметки) */
+static size_t page_len;
+static char page_ct[96];
+
+/* Загрузить адрес как страницу; картинка, если грузилась, — брошена. */
+static void net_go(const char *url) {
+    img_busy = 0;
+    relayout_at = 0;
+    fetch_start(url);
+}
+
 /* Строки без учёта регистра латиницы (имена фреймов: «Down» и «down» — одно и то же). */
 static int same_ci(const char *a, const char *b) {
     for (; *a && *b; a++, b++) {
@@ -219,6 +242,27 @@ static int history_push(const char *url, char *frames) {
     return 1;
 }
 
+/* Посещённые адреса — для цвета ссылок (посещённая — фиолетовая, по дизайну Codex): кольцо из
+ * 256 отпечатков адресов (djb2 — простая сумма-перемешивание байтов). Совпадение отпечатков у
+ * разных адресов возможно, но редко, и стоит лишь цвета ссылки. */
+static uint32_t visited[256];
+static unsigned visited_n;
+static uint32_t url_hash(const char *u) {
+    uint32_t h = 5381;
+    while (*u) h = h * 33 + (uint8_t)*u++;
+    return h ? h : 1;
+}
+static void visit(const char *url) {
+    uint32_t h = url_hash(url);
+    for (unsigned i = 0; i < 256; i++) if (visited[i] == h) return;
+    visited[visited_n++ & 255] = h;
+}
+static int is_visited(const char *url) {
+    uint32_t h = url_hash(url);
+    for (unsigned i = 0; i < 256; i++) if (visited[i] == h) return 1;
+    return 0;
+}
+
 /* Новая страница на экране: верх, кольцо целиком. */
 static int show_new_page(void) {
     snprintf(shown_url, sizeof(shown_url), "%s", current);
@@ -256,6 +300,19 @@ static int save_file(const fetch_result_t *r) {
     return 1;
 }
 
+/* Страница пришла не с набранного адреса, а с другого (сервер переадресовал: google.com →
+ * www.google.com, ответ формы — на страницу результата): её адрес — тот, откуда она пришла. Его
+ * видно в строке адреса, он же встаёт в историю вместо набранного (как в любом браузере). */
+static void page_moved(const char *url) {
+    if (!url[0] || !strcmp(url, current)) return;
+    if (hist_n && !history[hist_at].frames && !strcmp(history[hist_at].url, current))
+        snprintf(history[hist_at].url, URL_MAX, "%s", url);
+    snprintf(current, sizeof(current), "%s", url);
+    ui_set_url(current);
+    visit(url);
+    history_ui();
+}
+
 /* Перейти по адресу: записать его в строку адреса и историю (push = 1; при «назад», «вперёд»
  * и «обновить» — 0), встроенную страницу показать сразу, остальные — начать загружать. Пока
  * грузится, на экране остаётся прежняя страница, а глобус вращается. */
@@ -263,6 +320,7 @@ static int open_url(const char *url, int push) {
     frames_abort();
     snprintf(current, sizeof(current), "%s", url);
     ui_set_url(url);
+    visit(url);
     nav_pushed = push && history_push(url, NULL);
     history_ui();
     if (url_is_internal(url) || !net_ready) {
@@ -270,16 +328,31 @@ static int open_url(const char *url, int push) {
         loading = 0;
         ui_set_busy(0);
         frames_clear();
-        if (url_is_internal(url)) { demo_page(); internal_page = 1; }
+        img_busy = 0;
+        relayout_at = 0;
+        image_clear();
+        image_layout_begin();
+        if (url_is_internal(url)) { form_clear(); demo_page(); internal_page = 1; }
         else { html_error_page(url, "Network is not available", "This ESP firmware has no net_open (ABI 1.2+)."); internal_page = 0; }
         return show_new_page();
     }
     loading = 1;
     ui_set_busy(1);
-    fetch_start(url);
+    net_go(url);
     return 1;
 }
 
+
+/* Страницы фреймов fr — сверху вниз в одну страницу. */
+static void render_frames(void) {
+    html_begin();
+    for (int i = 0; i < fr_n; i++) {
+        fr[i].y = doc_y();
+        if (fr[i].body) html_part(fr[i].body, fr[i].length, fr[i].content_type, fr[i].url, i);
+        else html_part_note(fr[i].url, fr[i].error, i);
+    }
+    html_end();
+}
 
 /* Набор nx: загрузить следующий ещё не загруженный фрейм. Все загружены — nx становится fr,
  * страницы фреймов собираются сверху вниз в одну, и она показывается: с начала, с фрейма,
@@ -290,7 +363,7 @@ static int frames_next(void) {
         if (!nx[nx_at].body && !nx[nx_at].error[0]) {
             loading = 1;
             ui_set_busy(1);
-            fetch_start(nx[nx_at].url);
+            net_go(nx[nx_at].url);
             return 1;
         }
     int was_top = page_top();
@@ -304,13 +377,8 @@ static int frames_next(void) {
     internal_page = 0;
     snprintf(shown_url, sizeof(shown_url), "%s", current);
     uint32_t t0 = ts_core->millis();
-    html_begin();
-    for (int i = 0; i < fr_n; i++) {
-        fr[i].y = doc_y();
-        if (fr[i].body) html_part(fr[i].body, fr[i].length, fr[i].content_type, fr[i].url, i);
-        else html_part_note(fr[i].url, fr[i].error, i);
-    }
-    html_end();
+    image_clear();
+    render_frames();
     ts_log("tsafari: %s: %d frames, layout %u ms, %d px", current, fr_n, (unsigned)(ts_core->millis() - t0), page_height());
     target = 0;
     if (nx_focus == -2) target = was_top;
@@ -339,7 +407,7 @@ static int frame_done(int st, const fetch_result_t *r) {
     if (st == FETCH_FAILED) {
         snprintf(f->error, sizeof(f->error), "%s", r->error[0] ? r->error : "cannot open");
     } else {
-        html_frame_t sub[HTML_FRAMES_MAX];
+        static html_frame_t sub[HTML_FRAMES_MAX];   /* 4,3 КБ — не в стеке задачи (стек — в start) */
         int k = nx_expand < 3 ? html_frames(r->body, r->length, r->content_type, r->url, sub, HTML_FRAMES_MAX - nx_n + 1) : 0;
         if (k > 0) {
             nx_expand++;
@@ -360,6 +428,7 @@ static int frame_done(int st, const fetch_result_t *r) {
             memcpy(copy, r->body, r->length);
             f->body = copy;
             f->length = r->length;
+            snprintf(f->url, sizeof(f->url), "%s", r->url);   /* после переадресации — откуда пришёл */
             snprintf(f->content_type, sizeof(f->content_type), "%s", r->content_type);
         }
         ts_log("tsafari: frame %s: %u bytes in %u ms", r->url, (unsigned)r->length, (unsigned)r->took);
@@ -367,37 +436,67 @@ static int frame_done(int st, const fetch_result_t *r) {
     return frames_next();
 }
 
-/* Куда открыть ссылку на странице из фреймов: номер фрейма или −1 — во всё окно.
- * Без target (или _self, _parent) — в тот же фрейм, где ссылка; имя фрейма — в него;
- * _top, _blank и незнакомое имя — во всё окно (второго окна у нас нет). */
-static int link_frame(int id) {
+/* Куда открыть ссылку (или ответ формы) на странице из фреймов: номер фрейма или −1 — во всё
+ * окно. t — target, part — фрейм, где стоит ссылка. Без target (или _self, _parent) — в тот же
+ * фрейм; имя фрейма — в него; _top, _blank и незнакомое имя — во всё окно (второго окна у нас нет). */
+static int target_frame(const char *t, int part) {
     if (!fr_n) return -1;
-    const char *t = html_link_target(id);
-    int part = html_link_part(id);
     if (!t[0] || same_ci(t, "_self") || same_ci(t, "_parent")) return part < fr_n ? part : -1;
     for (int i = 0; i < fr_n; i++)
         if (fr[i].name[0] && same_ci(fr[i].name, t)) return i;
     return -1;
 }
 
-/* Щелчок по ссылке: во всё окно — как набранный адрес; во фрейм — загрузить новую страницу
- * только в этот фрейм, остальные фреймы остаются как есть. */
-static int follow_link(int id) {
-    const char *url = html_link(id);
-    if (!url) return 1;
-    int f = link_frame(id);
-    if (f < 0) return open_url(url, 1);
+/* Загрузить новую страницу только во фрейм f, остальные фреймы остаются как есть. */
+static int open_in_frame(const char *url, int f) {
     frames_abort();
     if (loading) fetch_cancel();
     memcpy(nx, fr, sizeof(fr[0]) * (size_t)fr_n);
     nx_n = fr_n;
     snprintf(nx[f].url, sizeof(nx[f].url), "%s", url);
+    visit(url);
     nx[f].body = NULL;
     nx[f].length = 0;
     nx[f].error[0] = 0;
     nav_pushed = history_push(current, frames_state(nx, nx_n));
     history_ui();
     return frames_load(f);
+}
+
+/* Щелчок по ссылке: во всё окно — как набранный адрес; во фрейм — open_in_frame. */
+static int follow_link(int id) {
+    const char *url = html_link(id);
+    if (!url) return 1;
+    int f = target_frame(html_link_target(id), html_link_part(id));
+    return f < 0 ? open_url(url, 1) : open_in_frame(url, f);
+}
+
+/* Отправить форму. GET — переход по адресу с ответами: во фрейм (форма во фрейме или у неё
+ * target) или во всё окно. POST — запрос с телом, ответ — во всё окно. */
+static int submit_form(form_submit_t *s) {
+    ts_log("tsafari: form %s %s (%u bytes)", s->body ? "POST" : "GET", s->url, (unsigned)s->body_len);
+    if (!s->body) {
+        int f = target_frame(s->target, s->part);
+        return f < 0 ? open_url(s->url, 1) : open_in_frame(s->url, f);
+    }
+    int ok = 1;
+    if (!net_ready) {
+        ok = open_url(s->url, 1);                             /* покажет «сети нет» */
+    } else {
+        frames_abort();
+        snprintf(current, sizeof(current), "%s", s->url);
+        ui_set_url(s->url);
+        nav_pushed = history_push(s->url, NULL);
+        history_ui();
+        loading = 1;
+        ui_set_busy(1);
+        img_busy = 0;
+        relayout_at = 0;
+        fetch_post(s->url, s->body, s->body_len);
+    }
+    ts_core->free(s->body);
+    s->body = NULL;
+    return ok;
 }
 
 /* Открыть запись истории номер at («назад», «вперёд»). Запись с фреймами — сразу их адреса,
@@ -444,10 +543,23 @@ static int fetch_step(void) {
     fetch_result_t *r = NULL;
     int st = fetch_poll(&r);
     if (st == FETCH_BUSY || st == FETCH_IDLE || !r) return 1;
+    if (img_busy) {                              /* это была картинка: в память видеочипа */
+        img_busy = 0;
+        if (!loading) ui_set_busy(0);
+        int ok_img = st == FETCH_DONE && !r->error[0];
+        if (image_loaded(img_url, ok_img ? r->body : NULL, ok_img ? r->length : 0) && !relayout_at)
+            relayout_at = ts_core->millis() + 700;   /* не чаще: картинки приходят одна за другой */
+        return 1;
+    }
     loading = 0;
     ui_set_busy(0);
     int was_file = net_file;
     net_file = 0;
+    if (r->streamed) {                           /* файл ушёл потоком на карту Evo (download.c): */
+        frames_abort();                          /* страница на экране остаётся прежней */
+        undo_nav();
+        return 1;
+    }
     if (was_file && st != FETCH_DONE) {          /* файл не докачался: сказать в индикаторе */
         download_note(r->url, r->disposition, st == FETCH_CANCELLED ? "Download cancelled" : "Network error",
                       st == FETCH_CANCELLED);
@@ -459,7 +571,8 @@ static int fetch_step(void) {
     if (nx_loading) return frame_done(st, r);
     if (st == FETCH_DONE && fetch_is_file(r->content_type, r->disposition)) return save_file(r);
     if (st == FETCH_DONE) {
-        html_frame_t sub[HTML_FRAMES_MAX];
+        page_moved(r->url);                      /* пришла с другого адреса — он и есть адрес страницы */
+        static html_frame_t sub[HTML_FRAMES_MAX];   /* 4,3 КБ — не в стеке задачи (стек — в start) */
         int k = html_frames(r->body, r->length, r->content_type, r->url, sub, HTML_FRAMES_MAX);
         if (k > 0) {
             ts_log("tsafari: %s: frameset of %d frames", r->url, k);
@@ -478,11 +591,32 @@ static int fetch_step(void) {
         html_error_page(r->url, "Cannot open the page", r->error);
     } else {
         uint32_t t0 = ts_core->millis();
+        image_clear();
         html_render(r->body, r->length, r->content_type, r->url);
         ts_log("tsafari: %s: %u bytes in %u ms, layout %u ms, %d px", r->url, (unsigned)r->length,
                (unsigned)r->took, (unsigned)(ts_core->millis() - t0), page_height());
+        uint8_t *b = fetch_take_body();          /* тело — себе: разложить заново, когда придут картинки */
+        if (page_body) ts_core->free(page_body);
+        page_body = b;
+        page_len = r->length;
+        snprintf(page_ct, sizeof(page_ct), "%s", r->content_type);
     }
     return show_new_page();
+}
+
+/* Разложить страницу на экране заново (пришла картинка, чей размер в HTML не был задан): та же
+ * прокрутка, набранное в полях форм — на месте. */
+static int relayout(void) {
+    int top = page_top();
+    if (internal_page) return 1;
+    form_save();
+    if (fr_n) render_frames();
+    else if (page_body) html_render(page_body, page_len, page_ct, shown_url);
+    else { form_restore(); return 1; }
+    form_restore();
+    target = top;
+    clamp_target(&target);
+    return page_scroll_to(target);
 }
 
 /* --- главный цикл --- */
@@ -492,7 +626,8 @@ static int fetch_step(void) {
 static void download_ui(void) {
     static fetch_result_t pk;                    /* static: в нём адрес на 512 байт */
     download_info_t di;
-    if (loading && fetch_peek(&pk) && fetch_is_file(pk.content_type, pk.disposition)) {
+    /* поток на карту уже начался — ход записи показывает download.c (сеть и запись идут вместе) */
+    if (loading && !download_busy() && fetch_peek(&pk) && fetch_is_file(pk.content_type, pk.disposition)) {
         char cp[DL_NAME_MAX + 1], name[DL_NAME_MAX * 2 + 1];
         download_name(pk.url, pk.disposition, cp, sizeof(cp));
         name[charset_to_utf8(CS_CP866, (const uint8_t *)cp, strlen(cp), name)] = 0;
@@ -528,6 +663,7 @@ static int browser_init(void) {
     if (!ui_init()) { fail("UI ASSETS UPLOAD FAILED"); return 0; }
     net_ready = fetch_init();
     download_init();
+    html_set_visited(is_visited);
     if (!net_ready) ts_log("tsafari: no net_open in this firmware: pages cannot be loaded");
     hist_n = hist_at = 0; loading = 0;
     if (!open_url("tsafari:about", 1)) { fail("PAGE UPLOAD FAILED"); return 0; }
@@ -557,24 +693,38 @@ static int browser_step(uint32_t now) {
     uint8_t pressed = (uint8_t)(m.buttons & ~held);
     held = m.buttons;
     int act = ui_mouse(cx, cy, pressed, held);
+    int on_page = !ui_wifi_open() && !ui_pointer_on_ui();
+    int wheel = m.wheel;
+    static form_submit_t sub;                    /* static: в нём адрес на 512 байт */
+    int submit = 0;
+    /* раскрытый список формы берёт мышь себе: подсветка пункта, выбор, колесо листает список */
+    if (form_mouse(cx, cy, act == UI_CLICK, on_page ? wheel : 0)) {
+        if (act == UI_CLICK) act = UI_NONE;
+        wheel = 0;
+    }
     /* курсор над ссылкой страницы (не над кнопками и плашками) — заливка цветом темы */
-    ui_set_link_hover(!ui_wifi_open() && !ui_pointer_on_ui() && page_link_at(cx, cy) >= 0);
+    ui_set_link_hover(on_page && page_link_at(cx, cy) >= 0);
     if (act == UI_CLICK) {
-        int link = page_link_at(cx, cy);
+        int fr_act = form_click(cx, cy, &sub);   /* поле, кнопка, флажок, список… */
+        if (fr_act == FORM_SUBMIT) submit = 1;
+        int link = fr_act == FORM_NONE ? page_link_at(cx, cy) : -1;
         if (link >= 0) {
             if (internal_page) target = demo_section_y(link);
             else if (!follow_link(link)) { fail("PAGE UPLOAD FAILED"); return -1; }
         }
     }
-    /* колесо — по 3 строки за щелчок; клавиши, которые не взял интерфейс, — прокрутка и
-     * переходы (список клавиш — на странице tsafari:about) */
-    if (m.wheel && !ui_wifi_open()) target -= m.wheel * 3 * PAGE_LINE_H;
+    /* колесо — по 3 строки за щелчок; клавиши, которые не взял интерфейс, — сначала полю формы
+     * в фокусе, потом прокрутка и переходы (список клавиш — на странице tsafari:about) */
+    if (wheel && !ui_wifi_open()) target -= wheel * 3 * PAGE_LINE_H;
     key_event_t ev;
     while (input_key(&ev)) {
         int used;
         int a = ui_key(&ev, &used);
         if (a != UI_NONE) act = a;
         if (used) continue;
+        int fk = form_key(&ev, &sub);
+        if (fk == FORM_SUBMIT) submit = 1;
+        if (fk != FORM_NONE) continue;
         switch (ev.key) {
         case KEY_UP: target -= PAGE_LINE_H; break;
         case KEY_DOWN: target += PAGE_LINE_H; break;
@@ -602,6 +752,7 @@ static int browser_step(uint32_t now) {
         ok = reload();
     } else if (act == UI_STOP) {
         if (loading) fetch_cancel();
+        else if (img_busy) { fetch_cancel(); image_stop(); }   /* стоп — картинки больше не грузить */
         else if (download_busy()) download_cancel();   /* Esc при записи файла — отмена */
     } else if (act == UI_DL_CANCEL) {                  /* крестик индикатора */
         if (loading && net_file) fetch_cancel();
@@ -611,7 +762,24 @@ static int browser_step(uint32_t now) {
     } else if (act == UI_FORWARD && hist_at + 1 < hist_n) {
         ok = open_history(hist_at + 1);
     }
+    if (submit && ok) ok = submit_form(&sub);
     if (ok) ok = fetch_step();
+    /* картинки страницы — по одной, когда страница уже на экране (сначала видимые) */
+    if (ok && !loading && !nx_loading && !img_busy && !ui_wifi_open()) {
+        const char *u = image_next(page_top());
+        if (u) {
+            snprintf(img_url, sizeof(img_url), "%s", u);
+            img_busy = 1;
+            ui_set_busy(1);
+            fetch_start_image(img_url);
+        }
+    }
+    int relaid = 0;
+    if (ok && relayout_at && (int32_t)(now - relayout_at) >= 0 && !loading && !nx_loading) {
+        relayout_at = 0;
+        ok = relayout();
+        relaid = 1;
+    }
     download_ui();
     if (!ok) { fail("PAGE UPLOAD FAILED"); return -1; }
     /* прокрутка к target (не больше 128 строк за кадр), потом кадр — только если что-то
@@ -623,7 +791,8 @@ static int browser_step(uint32_t now) {
         moved = 1;
     }
     ui_set_scroll(page_top(), page_height(), moved);
-    if (!ui_tick(now) && !moved) return 0;
+    int form_moved = form_changed();
+    if (!ui_tick(now) && !moved && !form_moved && !relaid && !image_changed()) return 0;
     if (!frame()) { if (ts_running) fail("FT812 LINK FAILED"); return -1; }
     return 1;
 }
@@ -667,7 +836,12 @@ static int command(uint8_t cmd, const uint8_t *p, uint16_t n) {
 }
 
 /* Запуск: проверить, что прошивка подходит (версия таблицы и функции FT812 есть), и
- * запустить задачу браузера: стек 8 КБ, приоритет 1, ядро 0. */
+ * запустить задачу браузера: стек 12 КБ, приоритет 1, ядро 0.
+ * СТЕК. Таблица в таблице разбирается рекурсивно (parse → table → render_range → parse, до
+ * четырёх уровней), и на каждом уровне — свой кадр разбора; в конце цепочки — разбор тега с
+ * буферами адресов. 04.11 со стеком 8 КБ и формами браузер на плате упал на vtrd.in (кадры
+ * ESP-сборки — gcc -fstack-usage: главный цикл держал в стеке 4,4 КБ адресов фреймов). Поэтому
+ * большие буферы, которые не нужны двум вызовам сразу, — static, а стек — с запасом. */
 static int start(const zm_core_t *c) {
     ts_core = c;
     state = ST_START;
@@ -678,7 +852,7 @@ static int start(const zm_core_t *c) {
     input_init();
     ts_running = 1;
     task_done = 0;
-    int r = c->task_start(browser_task, NULL, 8192, 1, 0);
+    int r = c->task_start(browser_task, NULL, 12288, 1, 0);
     if (r != ZM_OK) {
         task_done = 1; ts_running = 0;
         c->log("tsafari: start failed: browser task (%d)", r);

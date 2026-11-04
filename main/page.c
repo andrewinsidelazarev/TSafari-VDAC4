@@ -9,11 +9,21 @@
  * ПАЛИТРА. Байт точки — не цвет, а номер цвета в таблице из 256 цветов (палитре). Так точка
  * занимает 1 байт вместо 2. Палитра поделена так:
  *   0…31   — «сплошные» цвета (фон страницы, фоны блоков, линии);
- *   32…255 — 14 пар «цвет текста на цвете фона», по 16 оттенков на пару: оттенок 0 — чистый
- *            фон, 15 — чистый цвет текста, между ними — смеси для сглаженных краёв букв.
- * Точка глифа (4 бита, 0…15, font.h) — это сразу номер оттенка внутри пары: номер цвета =
- * начало пары + значение точки. Если цветов на странице больше, берётся ближайший похожий.
+ *   32…255 — пары «цвет на цвете фона»: L оттенков от чуть-чуть цвета до чистого цвета
+ *            (оттенок k — фон + (цвет − фон) · k / L). Буквам нужно 15 оттенков (точка глифа —
+ *            4 бита, 0…15), краям фигур (рамки полей, кружки переключателей) хватает 4. Пары
+ *            берутся подряд из общего запаса; пока места много — по 15 оттенков, к концу —
+ *            по 8, потом по 4: так на странице помещается до 60 пар, а не 14 (у vtrd.in пары
+ *            кончались, и «чёрный на сером» подменялся «белым на сером»).
+ * Точка глифа v (0…15) даёт оттенок k = v · L / 15 с округлением (у пары на 15 оттенков k = v);
+ * номер цвета — начало пары + k − 1, k = 0 — чистый фон, точку не трогаем. Если места в палитре
+ * нет совсем, берётся самая похожая из заведённых пар.
  * Палитр в памяти две: новая страница пишет свою во вторую, пока на экране первая.
+ *
+ * ВСТРОЕННЫЕ ЭЛЕМЕНТЫ (поля форм, кнопки) — прямоугольник страницы, который рисует не page.c,
+ * а тот, кто его поставил (form.c): при каждой отрисовке строк page.c зовёт painter, и тот рисует
+ * функциями page_paint_… в те же строки. Так поле с набранным текстом можно перерисовать
+ * (page_redraw), не раскладывая страницу заново.
  *
  * КОЛЬЦО. Страница бывает в десятки раз выше экрана, а памяти видеочипа хватает на 896 строк.
  * Поэтому храним только кусок вокруг видимой части. Строка страницы y лежит в строке кольца
@@ -27,12 +37,13 @@
 #include "font.h"
 #include "ts.h"
 
-enum { ITEM_RECT, ITEM_TEXT };            /* виды элементов: прямоугольник, строка текста */
+enum { ITEM_RECT, ITEM_TEXT, ITEM_WIDGET };  /* прямоугольник, строка текста, встроенный элемент */
 
 /* Один элемент страницы. Глифы строк текста хранятся отдельно, в общем массиве pool:
- * у элемента только номер первого глифа (glyph_at) и их число (count). */
+ * у элемента только номер первого глифа (glyph_at) и их число (count). У встроенного элемента
+ * в glyph_at — его номер (id), в bg — цвет фона под ним. */
 typedef struct {
-    uint8_t kind, flags;
+    uint8_t kind, flags, face;
     int16_t link;
     int16_t x;
     uint16_t w, h;
@@ -51,14 +62,16 @@ static uint8_t bg_index;                 /* его номер в палитре 
 static int height;                       /* высота страницы в точках */
 
 #define PAL_SOLIDS 32u
-#define PAL_PAIRS  ((256u - PAL_SOLIDS) / 16u)
+#define PAL_PAIRS  64u
 static uint16_t pal[256];                /* палитра в формате видеочипа RGB565 */
 static uint32_t pal_rgb[256];            /* те же цвета в 0xRRGGBB — для поиска похожего */
 static unsigned solid_n, pair_n;         /* занято сплошных цветов и пар */
+static unsigned pal_next;                /* первая свободная запись после пар */
 static uint32_t pair_fg[PAL_PAIRS], pair_bg[PAL_PAIRS];
+static uint8_t pair_base[PAL_PAIRS], pair_lv[PAL_PAIRS];
+static void (*painter)(int id, int x, int y, int w, int h, uint32_t bg);   /* рисует встроенные элементы */
 static unsigned pal_slot;                /* какая из двух палитр в памяти видеочипа наша (0 или 1) */
 static int pal_dirty;                    /* палитра менялась — отправить её в видеочип */
-
 /* Строки рисуются полосами по 32 строки в массив band (32 КБ), полоса уходит в видеочип,
  * потом рисуется следующая — так не нужен массив на всю страницу. */
 #define BAND_ROWS 32
@@ -78,16 +91,14 @@ static uint32_t dist(uint32_t a, uint32_t b) {
     int db = (int)(a & 255) - (int)(b & 255);
     return (uint32_t)(dr * dr + dg * dg + db * db);
 }
-static unsigned used_entries(void) { return PAL_SOLIDS + pair_n * 16u; }
-
-/* Сплошной цвет: уже есть такой (сплошной или край пары) — его номер; нет — новый сплошной;
- * места нет — ближайший из занятых. */
+/* Сплошной цвет: уже есть такой (сплошной или оттенок пары) — его номер; нет — новый
+ * сплошной; места нет — ближайший из занятых. */
 static uint8_t pal_solid(uint32_t rgb) {
     uint16_t c = rgb565(rgb);
     unsigned best = 0;
     uint32_t best_d = UINT32_MAX;
-    for (unsigned i = 0; i < used_entries(); i++) {
-        if (i >= solid_n && i < PAL_SOLIDS) continue;
+    for (unsigned i = 0; i < 256; i++) {
+        if ((i >= solid_n && i < PAL_SOLIDS) || i >= pal_next) continue;
         if (pal[i] == c) return (uint8_t)i;
         uint32_t d = dist(pal_rgb[i], rgb);
         if (d < best_d) { best_d = d; best = i; }
@@ -99,31 +110,48 @@ static uint8_t pal_solid(uint32_t rgb) {
     return (uint8_t)best;
 }
 
-/* Номер оттенка 0 пары «текст fg на фоне bg». Если такой пары ещё нет — заводим: 16 оттенков,
- * оттенок v = фон + (текст − фон) · v / 15 по каждому каналу (+7 — для округления). Мест нет
- * (все 14 заняты) — берём самую похожую пару. */
-static uint8_t pal_pair(uint32_t fg, uint32_t bg) {
+/* Пара «цвет fg на фоне bg»: где её оттенки в палитре и сколько их (L). */
+typedef struct { uint8_t base, levels; } pair_t;
+
+/* Пара на want оттенков (15 — буквы, 4 — края фигур). Такая уже есть — она (сколько бы у неё
+ * ни было оттенков); нет — новая: на 15 оттенков, пока в палитре свободно больше 55 записей,
+ * на 8 — больше 20, иначе на 4; места нет совсем — самая похожая из заведённых. */
+static pair_t pal_pair_lv(uint32_t fg, uint32_t bg, unsigned want) {
+    pair_t r = {PAL_SOLIDS, 15};
     unsigned best = 0;
     uint32_t best_d = UINT32_MAX;
     for (unsigned p = 0; p < pair_n; p++) {
-        if (pair_fg[p] == fg && pair_bg[p] == bg) return (uint8_t)(PAL_SOLIDS + p * 16u);
+        if (pair_fg[p] == fg && pair_bg[p] == bg) { r.base = pair_base[p]; r.levels = pair_lv[p]; return r; }
         uint32_t d = dist(pair_fg[p], fg) + dist(pair_bg[p], bg);
         if (d < best_d) { best_d = d; best = p; }
     }
-    if (pair_n == PAL_PAIRS) return (uint8_t)(PAL_SOLIDS + best * 16u);
-    unsigned base = PAL_SOLIDS + pair_n * 16u;
-    for (unsigned v = 0; v < 16; v++) {
+    unsigned free = 256u - pal_next, lv;
+    if (want >= 15 && free >= 15u + 40u) lv = 15;
+    else if (want >= 8 && free >= 8u + 12u) lv = 8;
+    else if (free >= 4u) lv = 4;
+    else lv = 0;
+    if (!lv || pair_n == PAL_PAIRS) {
+        if (pair_n) { r.base = pair_base[best]; r.levels = pair_lv[best]; }
+        return r;
+    }
+    unsigned base = pal_next;
+    for (unsigned k = 1; k <= lv; k++) {
         uint32_t c = 0;
         for (unsigned sh = 0; sh <= 16; sh += 8) {
             int f = (int)((fg >> sh) & 255), b = (int)((bg >> sh) & 255);
-            c |= (uint32_t)(b + ((f - b) * (int)v + 7) / 15) << sh;
+            c |= (uint32_t)(b + ((f - b) * (int)k + (int)lv / 2) / (int)lv) << sh;
         }
-        pal[base + v] = rgb565(c); pal_rgb[base + v] = c;
+        pal[base + k - 1] = rgb565(c); pal_rgb[base + k - 1] = c;
     }
-    pair_fg[pair_n] = fg; pair_bg[pair_n] = bg; pair_n++;
+    pair_fg[pair_n] = fg; pair_bg[pair_n] = bg;
+    pair_base[pair_n] = (uint8_t)base; pair_lv[pair_n] = (uint8_t)lv;
+    pair_n++;
+    pal_next += lv;
     pal_dirty = 1;
-    return (uint8_t)base;
+    r.base = (uint8_t)base; r.levels = (uint8_t)lv;
+    return r;
 }
+static pair_t pal_pair(uint32_t fg, uint32_t bg) { return pal_pair_lv(fg, bg, 15); }
 
 /* Новый пустой элемент в конце списка. Массив растёт удвоением: 256, 512, 1024… — так
  * перевыделять память приходится редко. NULL — память кончилась. */
@@ -143,7 +171,7 @@ static item_t *new_item(void) {
 void page_begin(uint32_t bg) {
     item_n = 0; pool_n = 0; height = 0;
     bg_rgb = bg;
-    solid_n = 0; pair_n = 0;
+    solid_n = 0; pair_n = 0; pal_next = PAL_SOLIDS;
     memset(pal, 0, sizeof(pal));
     pal_slot ^= 1u;
     bg_index = pal_solid(bg);
@@ -152,6 +180,7 @@ void page_begin(uint32_t bg) {
 }
 
 uint32_t page_bg(void) { return bg_rgb; }
+void page_set_bg(uint32_t bg) { bg_rgb = bg; bg_index = pal_solid(bg); ring_valid = 0; }
 int page_height(void) { return height; }
 int page_top(void) { return shown; }
 
@@ -174,9 +203,11 @@ void page_rect_height(int index, int h) {
 }
 
 /* Глифы копируются в общий массив pool (он растёт удвоением, как items). Ширина строки —
- * число глифов × 12 точек: шрифт моноширинный, все буквы одной ширины. */
-void page_text(int x, int y, const uint16_t *glyphs, unsigned count, uint32_t fg, uint32_t bg,
+ * число глифов × шаг начертания: шрифт моноширинный, все буквы одного начертания одной ширины. */
+void page_text(int x, int y, unsigned face, const uint16_t *glyphs, unsigned count, uint32_t fg, uint32_t bg,
                unsigned flags, int link) {
+    if (face >= FACE_COUNT) face = FACE_BODY;
+    const font_face_t *f = &font_faces[face];
     if (!count) return;
     if (pool_n + count > pool_cap) {
         unsigned cap = pool_cap ? pool_cap : 4096;
@@ -188,11 +219,33 @@ void page_text(int x, int y, const uint16_t *glyphs, unsigned count, uint32_t fg
     item_t *it = new_item();
     if (!it) return;
     memcpy(pool + pool_n, glyphs, count * sizeof(uint16_t));
-    it->kind = ITEM_TEXT; it->flags = (uint8_t)flags; it->link = (int16_t)link;
-    it->x = (int16_t)x; it->y = y; it->w = (uint16_t)(count * FONT_CELL_W); it->h = PAGE_LINE_H;
+    it->kind = ITEM_TEXT; it->flags = (uint8_t)flags; it->face = (uint8_t)face; it->link = (int16_t)link;
+    it->x = (int16_t)x; it->y = y; it->w = (uint16_t)(count * f->w); it->h = f->h;
     it->fg = fg; it->bg = bg; it->glyph_at = pool_n; it->count = (uint16_t)count;
     pool_n += count;
-    if (y + PAGE_LINE_H > height) height = y + PAGE_LINE_H;
+    if (y + f->h > height) height = y + f->h;
+}
+
+int page_widget(int x, int y, int w, int h, int id, uint32_t bg, int link) {
+    if (w <= 0 || h <= 0) return -1;
+    item_t *it = new_item();
+    if (!it) return -1;
+    it->kind = ITEM_WIDGET; it->x = (int16_t)x; it->y = y; it->w = (uint16_t)w; it->h = (uint16_t)h;
+    it->glyph_at = (uint32_t)id; it->bg = bg; it->link = (int16_t)link;
+    if (y + h > height) height = y + h;
+    return (int)(it - items);
+}
+
+void page_set_painter(void (*paint)(int id, int x, int y, int w, int h, uint32_t bg)) { painter = paint; }
+
+int page_widget_at(int x, int y) {
+    int py = shown + y;
+    for (unsigned i = 0; i < item_n; i++) {
+        const item_t *it = &items[i];
+        if (it->kind == ITEM_WIDGET && py >= it->y && py < it->y + it->h && x >= it->x && x < it->x + it->w)
+            return (int)it->glyph_at;
+    }
+    return -1;
 }
 
 /* Перебираем строки текста со ссылками и ищем ту, в чей прямоугольник попала точка. Точка
@@ -201,52 +254,134 @@ int page_link_at(int x, int y) {
     int py = shown + y;
     for (unsigned i = 0; i < item_n; i++) {
         const item_t *it = &items[i];
-        if (it->kind == ITEM_TEXT && it->link >= 0 && py >= it->y && py < it->y + it->h &&
-            x >= it->x && x < it->x + it->w)
+        if ((it->kind == ITEM_TEXT || it->kind == ITEM_WIDGET) && it->link >= 0 && py >= it->y && py < it->y + it->h &&
+            x >= it->x && x < it->x + it->w)                   /* картинка в ссылке — тоже ссылка */
             return it->link;
     }
     return -1;
 }
 
 /* --- рисование строк страницы [y0, y0 + rows) в полосу band ---
- * Полоса — массив rows строк по 1024 байта; строка страницы y — строка полосы y − y0. */
+ * Полоса — массив rows строк по 1024 байта; строка страницы y — строка полосы y − y0.
+ * clip_l…clip_r — где по ширине можно рисовать (у текста в поле формы — внутри поля). */
+static int clip_l = 0, clip_r = TS_W;
+static int cur_y0, cur_rows;             /* какую полосу рисуем сейчас (для page_paint_…) */
 
 /* Залить прямоугольник номером цвета index — только ту его часть, что попала в полосу
  * (a…b по высоте) и в экран (l…r по ширине). */
 static void fill(int y0, int rows, int x, int y, int w, int h, uint8_t index) {
     int a = y > y0 ? y : y0, b = y + h < y0 + rows ? y + h : y0 + rows;
-    int l = x > 0 ? x : 0, r = x + w < TS_W ? x + w : TS_W;
+    int l = x > clip_l ? x : clip_l, r = x + w < clip_r ? x + w : clip_r;
     for (int row = a; row < b && l < r; row++) memset(band + (size_t)(row - y0) * TS_W + l, index, (size_t)(r - l));
 }
 
-/* Нарисовать строку текста в полосу. Каждая точка глифа (4 бита) даёт номер цвета
- * base + значение; нулевые точки (чистый фон) пропускаем — там уже фон, залитый раньше.
- * В байте глифа две точки: старшие 4 бита — левая, младшие — правая. Клетка глифа стоит так,
- * чтобы базовая линия шрифта (26) совпала с базовой линией строки страницы (PAGE_ASCENT). */
-static void paint_text(int y0, int rows, const item_t *it) {
-    uint8_t base = pal_pair(it->fg, it->bg);
-    int top = it->y + PAGE_ASCENT - FONT_BASELINE;
-    int a = top > y0 ? top : y0, b = top + FONT_CELL_H < y0 + rows ? top + FONT_CELL_H : y0 + rows;
-    const uint16_t *g = pool + it->glyph_at;
-    for (unsigned i = 0; i < it->count && a < b; i++) {
-        int gx = it->x + (int)i * FONT_CELL_W;
-        if (gx >= TS_W) break;
-        if (gx + FONT_CELL_W <= 0) continue;
-        const uint8_t *cell = font_glyph(g[i]);
-        for (int row = a; row < b; row++) {
-            const uint8_t *src = cell + (row - top) * (FONT_CELL_W / 2);
-            uint8_t *dst = band + (size_t)(row - y0) * TS_W;
-            for (int k = 0; k < FONT_CELL_W / 2; k++) {
-                uint8_t v = src[k];
-                if (!v) continue;
-                int px = gx + 2 * k;
-                if ((v >> 4) && px >= 0 && px < TS_W) dst[px] = (uint8_t)(base + (v >> 4));
-                if ((v & 15) && px + 1 >= 0 && px + 1 < TS_W) dst[px + 1] = (uint8_t)(base + (v & 15));
+/* Один глиф в полосу: клетка cw×ch (stride байт в строке) с левым верхним углом (gx, top).
+ * Точка глифа (4 бита) даёт оттенок пары p (как — в начале файла); нулевые точки (чистый фон)
+ * пропускаем — там уже фон, залитый раньше. В байте две точки: старшие 4 бита — левая, младшие —
+ * правая. Где точка уже закрашена этой же парой цветов (соседний глиф, жирный), остаётся более
+ * насыщенная. bold — то же ещё раз на точку правее: синтетический жирный по дизайну Codex. */
+static void paint_cell(int y0, int rows, const uint8_t *cell, int cw, int ch, int stride, int gx, int top,
+                       pair_t p, int bold) {
+    int a = top > y0 ? top : y0, b = top + ch < y0 + rows ? top + ch : y0 + rows;
+    for (int row = a; row < b; row++) {
+        const uint8_t *src = cell + (row - top) * stride;
+        uint8_t *dst = band + (size_t)(row - y0) * TS_W;
+        for (int k = 0; k < cw; k++) {
+            int v = (src[k >> 1] >> ((k & 1) ? 0 : 4)) & 15;
+            int lv = p.levels == 15 ? v : (v * p.levels + 7) / 15;   /* оттенок пары, 0 — фон */
+            if (!lv) continue;
+            for (int d = 0; d <= bold; d++) {
+                int px = gx + k + d;
+                if (px < clip_l || px >= clip_r) continue;
+                int cur = dst[px] >= p.base && dst[px] < p.base + p.levels ? dst[px] - p.base + 1 : 0;
+                if (lv > cur) dst[px] = (uint8_t)(p.base + lv - 1);
             }
         }
     }
-    if (it->flags & PAGE_UNDERLINE)
-        fill(y0, rows, it->x, it->y + PAGE_ASCENT + 2, it->w, 1, (uint8_t)(base + 15));
+}
+
+/* Нарисовать строку текста в полосу: глифы подряд с шагом начертания. Знака нет в
+ * начертании — его рисует основной шрифт, по центру клетки и на той же базовой линии.
+ * Подчёркивание — на 2 точки ниже базовой линии (у крупных заголовков — толщиной 2). */
+static void paint_glyphs(int y0, int rows, int x, int y, unsigned face, const uint16_t *g, unsigned count,
+                         uint32_t fg, uint32_t bg, unsigned flags) {
+    const font_face_t *f = &font_faces[face], *body = &font_faces[FACE_BODY];
+    pair_t base = pal_pair(fg, bg);
+    int bold = (flags & PAGE_BOLD) != 0;
+    for (unsigned i = 0; i < count; i++) {
+        int gx = x + (int)i * f->w;
+        if (gx >= clip_r) break;
+        if (gx + f->w <= clip_l) continue;
+        const uint8_t *cell = font_glyph_face(face, g[i]);
+        if (cell) paint_cell(y0, rows, cell, f->w, f->h, f->stride, gx, y, base, bold);
+        else paint_cell(y0, rows, font_glyph(g[i]), body->w, body->h, body->stride, gx + (f->w - body->w) / 2,
+                        y + f->baseline - body->baseline, base, bold);
+    }
+    int w = (int)count * f->w;
+    uint8_t solid = (uint8_t)(base.base + base.levels - 1);    /* чистый цвет пары */
+    if (flags & PAGE_UNDERLINE)
+        fill(y0, rows, x, y + f->baseline + 2, w, f->h > 40 ? 2 : 1, solid);
+    if (flags & PAGE_STRIKE)                                      /* на трети высоты строчной буквы */
+        fill(y0, rows, x, y + f->baseline - f->baseline / 3, w, f->h > 40 ? 2 : 1, solid);
+}
+static void paint_text(int y0, int rows, const item_t *it) {
+    paint_glyphs(y0, rows, it->x, it->y, it->face, pool + it->glyph_at, it->count, it->fg, it->bg, it->flags);
+}
+
+/* --- рисование для встроенных элементов (зовёт painter во время render_rows) --- */
+
+/* Скруглённый прямоугольник цвета fg на фоне bg со сглаженными углами. Точка целиком внутри —
+ * чистый fg; точка на скруглении угла делится на 4×4 «пробы», и доля проб внутри круга угла
+ * даёт оттенок края (пара на 4 оттенка). Круг — это скругление на всю половину стороны. */
+void page_paint_round(int x, int y, int w, int h, int r, uint32_t fg, uint32_t bg) {
+    if (w <= 0 || h <= 0 || !band) return;
+    if (2 * r > w) r = w / 2;
+    if (2 * r > h) r = h / 2;
+    int a = y > cur_y0 ? y : cur_y0, b = y + h < cur_y0 + cur_rows ? y + h : cur_y0 + cur_rows;
+    int l = x > clip_l ? x : clip_l, rt = x + w < clip_r ? x + w : clip_r;
+    if (a >= b || l >= rt) return;
+    pair_t s = pal_pair_lv(fg, bg, 4);
+    uint8_t full = (uint8_t)(s.base + s.levels - 1);
+    int r8 = 8 * r;
+    for (int row = a; row < b; row++) {
+        uint8_t *dst = band + (size_t)(row - cur_y0) * TS_W;
+        if (row >= y + r && row < y + h - r) { memset(dst + l, full, (size_t)(rt - l)); continue; }
+        int cy = row < y + r ? y + r : y + h - r;                     /* центр круга угла по y */
+        for (int px = l; px < rt; px++) {
+            if (px >= x + r && px < x + w - r) { dst[px] = full; continue; }
+            int cx = px < x + r ? x + r : x + w - r;
+            int in = 0;
+            for (int j = 0; j < 4; j++) {
+                int dy = row * 8 + 2 * j + 1 - cy * 8;                  /* в восьмых долях точки */
+                if ((row < y + r && dy > 0) || (row >= y + h - r && dy < 0)) dy = 0;
+                for (int i = 0; i < 4; i++) {
+                    int dx = px * 8 + 2 * i + 1 - cx * 8;
+                    if ((px < x + r && dx > 0) || (px >= x + w - r && dx < 0)) dx = 0;
+                    if (dx * dx + dy * dy <= r8 * r8) in++;
+                }
+            }
+            int q = (in * s.levels + 8) / 16;                         /* 0…16 проб → оттенок пары */
+            if (q) dst[px] = (uint8_t)(s.base + q - 1);
+        }
+    }
+}
+
+/* Маска L4 (иконка: 4 бита на точку, как у букв) цветом fg на фоне bg. */
+void page_paint_mask(int x, int y, int w, int h, const uint8_t *l4, int stride, uint32_t fg, uint32_t bg) {
+    if (!band) return;
+    paint_cell(cur_y0, cur_rows, l4, w, h, stride, x, y, pal_pair_lv(fg, bg, 8), 0);
+}
+
+/* Глифы начертания face с верхом клетки y, видно только между clip_left и clip_right. */
+void page_paint_text(int x, int y, unsigned face, const uint16_t *g, unsigned n, uint32_t fg, uint32_t bg,
+                     unsigned flags, int clip_left, int clip_right) {
+    if (!band || !n) return;
+    if (face >= FACE_COUNT) face = FACE_BODY;
+    int ol = clip_l, orr = clip_r;
+    clip_l = clip_left > ol ? clip_left : ol;
+    clip_r = clip_right < orr ? clip_right : orr;
+    if (clip_l < clip_r) paint_glyphs(cur_y0, cur_rows, x, y, face, g, n, fg, bg, flags);
+    clip_l = ol; clip_r = orr;
 }
 
 /* Отправить полосу в кольцо. Если полоса упирается в конец кольца (строка 895), она идёт
@@ -268,19 +403,38 @@ static int render_rows(int a, int b) {
     for (int y0 = a; y0 < b; y0 += BAND_ROWS) {
         int rows = b - y0 < BAND_ROWS ? b - y0 : BAND_ROWS;
         memset(band, bg_index, (size_t)rows * TS_W);
+        cur_y0 = y0; cur_rows = rows;
         for (unsigned i = 0; i < item_n; i++) {
             const item_t *it = &items[i];
             if (it->kind == ITEM_RECT) {
                 if (it->y < y0 + rows && it->y + it->h > y0)
                     fill(y0, rows, it->x, it->y, it->w, it->h, pal_solid(it->fg));
-            } else if (it->y + PAGE_ASCENT - FONT_BASELINE < y0 + rows &&
-                       it->y + PAGE_ASCENT - FONT_BASELINE + FONT_CELL_H > y0) {
+            } else if (it->kind == ITEM_WIDGET) {
+                if (painter && it->y < y0 + rows && it->y + it->h > y0)
+                    painter((int)it->glyph_at, it->x, it->y, it->w, it->h, it->bg);
+            } else if (it->y < y0 + rows && it->y + it->h + 4 > y0) {      /* +4 — подчёркивание */
                 paint_text(y0, rows, it);
             }
         }
         if (!upload(y0, rows)) return 0;
     }
     return 1;
+}
+
+/* Палитра менялась — отправить её (в ту же половину: новые цвета — в свободных местах,
+ * видимые точки старых цветов не меняются). */
+static int put_palette(void) {
+    if (!pal_dirty) return 1;
+    if (!ft_put(RAMG_PAL + pal_slot * 512u, pal, sizeof(pal))) return 0;
+    pal_dirty = 0;
+    return 1;
+}
+
+int page_redraw(int y, int h) {
+    if (!ring_valid) return 1;
+    int a = y > ring_lo ? y : ring_lo, b = y + h < ring_hi ? y + h : ring_hi;
+    if (a < b && !render_rows(a, b)) return 0;
+    return put_palette();
 }
 
 /* Прокрутка: target — какую строку страницы показать вверху экрана. */
@@ -315,11 +469,7 @@ int page_scroll_to(int target) {
         }
         shown = t;
     }
-    if (pal_dirty) {
-        if (!ft_put(RAMG_PAL + pal_slot * 512u, pal, sizeof(pal))) return 0;
-        pal_dirty = 0;
-    }
-    return 1;
+    return put_palette();
 }
 
 /* Команды для видеочипа: «бери палитру отсюда, картинку отсюда, рисуй в (0, 0)». Видимые

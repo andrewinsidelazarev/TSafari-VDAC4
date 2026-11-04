@@ -22,3 +22,6 @@ int charset_detect(const char *content_type, const uint8_t *body, size_t len);
 /* Перевести n байт в UTF-8. Буква в UTF-8 занимает до 3 байт, поэтому out должен вмещать
  * 3 × n байт. Возвращает длину результата. */
 size_t charset_to_utf8(int cs, const uint8_t *in, size_t n, char *out);
+/* Байт однобайтовой кодировки cs для буквы с кодом Unicode c; −1 — такой буквы в ней нет
+ * (и для UTF-8 — там буква занимает несколько байт). */
+int charset_from_unicode(int cs, uint32_t c);

@@ -395,6 +395,7 @@ int ui_tick(uint32_t now) {
 }
 
 void ui_set_link_hover(int on) { if (on != link_hover) { link_hover = on; changed = 1; } }
+int ui_lang_flash(void) { return lang_until != 0; }
 int ui_pointer_on_ui(void) {
     return hover != H_NONE || (addr_t && my < TSA_UI_ADDRESS_Y + TSA_UI_ADDRESS_HEIGHT && mx >= TSA_UI_ADDRESS_X);
 }

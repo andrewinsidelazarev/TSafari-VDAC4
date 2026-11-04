@@ -4,6 +4,7 @@
  * Цвета — из дизайна Codex (ui_design.h). */
 #include "page.h"
 #include "doc.h"
+#include "font.h"
 #include "demo.h"
 #include "ts.h"
 #include "ui_design.h"
@@ -20,7 +21,7 @@
 static int section_y[DEMO_SECTIONS];     /* где начинается каждый раздел (для перехода по ссылке) */
 
 /* Стили: {цвет букв, фон (0 — как у страницы), флаги, номер ссылки (−1 — не ссылка)}. */
-static const doc_style_t S_TEXT = {TEXT, 0, 0, -1}, S_DIM = {DIM, 0, 0, -1}, S_HEAD = {HEAD, 0, PAGE_UNDERLINE, -1};
+static const doc_style_t S_TEXT = {TEXT, 0, 0, -1}, S_DIM = {DIM, 0, 0, -1}, S_HEAD = {HEAD, 0, 0, -1, FACE_H3};
 
 /* Абзац обычного текста; после него — 10 точек промежутка. */
 static void text(const char *t) { doc_para(&t, &S_TEXT, 1, 10); }
@@ -46,7 +47,7 @@ void demo_page(void) {
     doc_begin(BG);
     {
         const char *t[] = {"TSafari", " — веб-браузер для VDAC4: ZX Evolution, Tang Nano 20K, ESP32-S3."};
-        const doc_style_t s[] = {{HEAD, 0, 0, -1}, S_TEXT};
+        const doc_style_t s[] = {{HEAD, 0, 0, -1, FACE_H1}, S_TEXT};
         doc_para(t, s, 2, 6);
     }
     {
@@ -61,7 +62,7 @@ void demo_page(void) {
     head(0, "1. Шрифт");
     text("Noto Sans Mono из просмотрщика текстов TXTVIEW2 (WC Improved): 2278 кодов Unicode, 2862 глифа, "
          "ячейка 12×34, кегль 20 точек. Сглаживание — 16 уровней через палитру страницы.");
-    doc_box_begin(BOX);
+    doc_box_begin(BOX, 12, 6, 0);
     for (unsigned i = 0; i < sizeof(languages) / sizeof(languages[0]); i++) {
         const char *t = languages[i];
         doc_para(&t, &S_TEXT, 1, 0);

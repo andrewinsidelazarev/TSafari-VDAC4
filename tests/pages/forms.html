@@ -1,0 +1,20 @@
+<html><head><title>Формы</title></head><body>
+<h2>Поиск</h2>
+<form action="echo" method="get">
+Запрос: <input name="q" value="ZX" size=30> <input type="submit" value="Найти">
+<input type="hidden" name="lang" value="ru">
+</form>
+<h3>Анкета</h3>
+<form action="http://test.local/echo" method="post">
+<p>Имя: <input name="name" placeholder="Ваше имя"> Пароль: <input type=password name=pw value="secret"></p>
+<p><input type=checkbox name=keep checked> Запомнить <input type=checkbox name=news value=yes> Новости
+<input type=radio name=mode value=text checked> Текст <input type=radio name=mode value=img> Текст и картинки</p>
+<p>Машина: <select name=machine><option>ZX Spectrum 48K<option selected value="Evo">ZX Evolution<option>Pentagon 128</select>
+<textarea name=note rows=3 cols=40>
+Первая строка
+Вторая строка</textarea></p>
+<p><button type=submit name=go value=1>Отправить</button> <input type=reset value="Сбросить"></p>
+</form>
+<form action="https://test.local/echo" method="post"><input name=x value=1> <input type=submit value="POST по HTTPS"></form>
+<table border=1><form action="echo"><tr><td>В таблице: <input name=t value="cell"></td><td><input type=submit value="OK"></td></tr></form></table>
+</body></html>

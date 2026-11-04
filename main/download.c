@@ -4,7 +4,15 @@
  * ДВЕ ЗАДАЧИ. Событие программе Z80 шлёт и сроки проверяет задача браузера (download_tick),
  * а куски файла отдаёт задача обмена прошивки (download_command), когда программа Z80 их
  * просит. Общие переменные — под замком mutex (как в input.c). Освобождать память файла
- * задача обмена не берётся: она только ставит release, а освобождает задача браузера. */
+ * задача обмена не берётся: она только ставит release, а освобождает задача браузера.
+ *
+ * ПОТОКОМ. Файл из сети (fetch.c) идёт не целиком в память, а через кольцо ring — буфер до
+ * 2 МБ в PSRAM: задача загрузки дописывает в него принятое (download_stream_put), программа Z80
+ * забирает куски с начала. Кольцо полно — задача загрузки ждёт, пока Z80 запишет часть на карту.
+ * Так файл любого размера проходит через память ограниченного размера (на плате 04.11 файл
+ * 6,3 МБ целиком в PSRAM не поместился: «no memory for the page»). Кусок, которого ещё нет, Z80
+ * получает ответом «позже» (F6 … [2]); файл без длины в заголовках кончается ответом «конец
+ * файла» (F6 … [3]). Третья задача — загрузки — тоже под тем же замком. */
 #include <stdio.h>
 #include <string.h>
 #include "download.h"
@@ -28,6 +36,12 @@ static int stalled;                      /* DL_FAILED из-за срока: по
 static uint32_t last;                    /* когда программа Z80 последний раз отозвалась */
 static char card_name[DL_NAME_MAX + 1];  /* имя на карте, CP866 */
 static download_info_t info;
+/* поток: файл [ring_base, ring_end) лежит в кольце ring (ring_cap байт) с места ring_base % ring_cap */
+static int stream;                       /* загрузка потоковая (иначе файл целиком в data) */
+static uint8_t *ring;
+static uint32_t ring_cap, ring_base, ring_end;
+static int net_done;                     /* сеть отдала файл целиком */
+#define SIZE_UNKNOWN 0xFFFFFFFFu         /* в событии E7: длины сервер не сказал — конец по [3] */
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
@@ -158,11 +172,14 @@ void download_name(const char *url, const char *disp, char *out, size_t cap) {
 /* --- задача браузера -------------------------------------------------------------------- */
 
 int download_start(uint8_t *body, size_t length, const char *url, const char *disposition) {
-    uint8_t *old = NULL;
+    uint8_t *old = NULL, *old_ring = NULL;
     ts_core->mutex_lock(mutex);
     int busy = download_busy();
     if (!busy) {
         old = data;                                  /* прошлый файл, ещё не освобождённый */
+        old_ring = ring;
+        ring = NULL;
+        stream = 0;
         release = 0;
         data = body;
         stalled = 0;
@@ -180,9 +197,98 @@ int download_start(uint8_t *body, size_t length, const char *url, const char *di
     }
     ts_core->mutex_unlock(mutex);
     if (old) ts_core->free(old);
+    if (old_ring) ts_core->free(old_ring);
     if (busy) ts_core->free(body);
     else ts_log("tsafari: download %s (%u bytes)", card_name, (unsigned)length);
     return !busy;
+}
+
+/* Кольцо: столько, сколько файл (если меньше), но не больше 2 МБ; нет памяти — меньше, до
+ * 64 КБ. На стенде ПК задача загрузки не ждёт Z80 (всё идёт в одном потоке), поэтому там
+ * кольцо — на весь файл, а запись по кругу проверяется отдельно (tests/host.c). */
+static uint32_t ring_limit = 2u * 1024u * 1024u;
+void download_stream_ring(uint32_t bytes) { ring_limit = bytes; }
+
+int download_stream_begin(const char *url, const char *disposition, uint32_t total) {
+    uint8_t *old = NULL, *old_ring = NULL, *nr = NULL;
+    uint32_t cap = total && total < ring_limit ? total : ring_limit;
+    while (!(nr = ts_alloc(cap))) {                     /* нет памяти — вдвое меньше, до 16 КБ */
+        if (cap <= 16384u) return 0;
+        cap = cap / 2 < 16384u ? 16384u : cap / 2;
+    }
+    ts_core->mutex_lock(mutex);
+    int busy = download_busy();
+    if (!busy) {
+        old = data; data = NULL;
+        old_ring = ring;
+        ring = nr; ring_cap = cap; ring_base = ring_end = 0;
+        stream = 1; net_done = 0;
+        release = 0;
+        stalled = 0;
+        size = total ? total : SIZE_UNKNOWN;
+        sent = 0;
+        seq++;
+        cancel = 0;
+        event_due = 1;
+        last = ts_core->millis();
+        download_name(url, disposition, card_name, sizeof(card_name));
+        memset(&info, 0, sizeof(info));
+        info.name[charset_to_utf8(CS_CP866, (const uint8_t *)card_name, strlen(card_name), info.name)] = 0;
+        info.size = total;
+        set_state(DL_WAIT);
+    }
+    ts_core->mutex_unlock(mutex);
+    if (old) ts_core->free(old);
+    if (old_ring) ts_core->free(old_ring);
+    if (busy) { ts_core->free(nr); return 0; }
+    ts_log("tsafari: download %s (%u bytes, ring %u)", card_name, (unsigned)total, (unsigned)cap);
+    return 1;
+}
+
+uint32_t download_stream_room(void) {
+    ts_core->mutex_lock(mutex);
+    uint32_t room = stream && ring ? ring_cap - (ring_end - ring_base) : 0;
+    ts_core->mutex_unlock(mutex);
+    return room;
+}
+
+int download_stream_put(const uint8_t *p, size_t n, const volatile int *abort) {
+    while (n) {
+        ts_core->mutex_lock(mutex);
+        if (!stream || !ring || !download_busy() || cancel) { ts_core->mutex_unlock(mutex); return 0; }
+        uint32_t room = ring_cap - (ring_end - ring_base);
+        if (!room) {                                    /* кольцо полно — Z80 ещё пишет */
+            ts_core->mutex_unlock(mutex);
+            if ((abort && *abort) || !__atomic_load_n(&ts_running, __ATOMIC_ACQUIRE)) return 0;
+            ts_core->delay(10);
+            continue;
+        }
+        uint32_t at = ring_end % ring_cap, k = (uint32_t)n;
+        if (k > room) k = room;
+        if (k > ring_cap - at) k = ring_cap - at;        /* до конца кольца, остальное — с начала */
+        memcpy(ring + at, p, k);
+        ring_end += k;
+        ts_core->mutex_unlock(mutex);
+        p += k;
+        n -= k;
+    }
+    return 1;
+}
+
+void download_stream_end(int ok, const char *error) {
+    ts_core->mutex_lock(mutex);
+    if (stream && download_busy()) {
+        if (ok) {
+            net_done = 1;
+            if (size == SIZE_UNKNOWN) info.size = ring_end;   /* теперь длина известна */
+        } else {
+            snprintf(info.error, sizeof(info.error), "%s", error && error[0] ? error : "Network error");
+            if (cancel || (error && strstr(error, "cancel"))) info.cancelled = 1;
+            cancel = 1;                                  /* Z80 получит отказ и закроет файл */
+            set_state(DL_FAILED);
+        }
+    }
+    ts_core->mutex_unlock(mutex);
 }
 
 void download_note(const char *url, const char *disposition, const char *error, int cancelled) {
@@ -230,8 +336,10 @@ void download_tick(uint32_t now) {
         stalled = 1;                             /* файл не освобождать: Z80 может ожить */
         release = 0;
     }
-    if (release) { drop = data; data = NULL; release = 0; }
+    uint8_t *drop_ring = NULL;
+    if (release) { drop = data; data = NULL; drop_ring = ring; ring = NULL; release = 0; }
     ts_core->mutex_unlock(mutex);
+    if (drop_ring) ts_core->free(drop_ring);
     if (len && ts_core->event(0xE7, ev, len, 0) == ZM_OK) {
         ts_core->mutex_lock(mutex);
         event_due = 0;
@@ -250,8 +358,25 @@ void download_info(download_info_t *out) {
 
 /* --- задача обмена ----------------------------------------------------------------------- */
 
+/* Кусок потока с места at — в out: 1 — есть (*count байт), 2 — ещё не пришёл из сети («позже»),
+ * 3 — файл кончился, 0 — отказ. Место до at больше не нужно (Z80 переспрашивает только
+ * текущий кусок) — его займёт сеть. Под замком. */
+static int stream_piece(uint32_t at, uint8_t *out, uint32_t *count) {
+    if (!ring || at < ring_base || at > ring_end) return 0;
+    if (at == ring_end) return net_done ? 3 : 2;
+    uint32_t k = ring_end - at, pos = at % ring_cap;
+    if (k > PIECE) k = PIECE;
+    uint32_t first = ring_cap - pos < k ? ring_cap - pos : k;
+    memcpy(out, ring + pos, first);
+    memcpy(out + first, ring, k - first);
+    ring_base = at;
+    *count = k;
+    return 1;
+}
+
 /* 76 [номер][смещение] → F6 [номер][1][смещение][число][данные] — кусок с этого места (не
  * дальше уже отданного: программа Z80 может переспросить кусок, если кадр не дошёл).
+ * Поток: F6 [номер][2][смещение][0] — куска ещё нет, спросить позже; [3] — конец файла.
  * Чужой номер, отмена, смещение за концом — F6 [номер][0]… (отказ).
  * 77 [номер][итог][код][ГГГГ-ММ-ДД] → F7 [1] — чем кончилось. */
 int download_command(uint8_t cmd, const uint8_t *p, uint16_t n) {
@@ -262,7 +387,19 @@ int download_command(uint8_t cmd, const uint8_t *p, uint16_t n) {
         if (n >= 2) memcpy(r, p, 2);
         ts_core->mutex_lock(mutex);
         uint32_t at = n == 6 ? rd32(p + 2) : 0;
-        if (n == 6 && rd16(p) == seq && (download_busy() || stalled) && !cancel && data && at < size && at <= sent) {
+        int st = 0;
+        uint32_t piece = 0;
+        if (n == 6 && rd16(p) == seq && (download_busy() || stalled) && !cancel && stream &&
+            (st = stream_piece(at, r + 9, &piece)) != 0) {
+            if (stalled && st == 1) { stalled = 0; set_state(DL_SEND); info.error[0] = 0; }   /* ожила */
+            r[2] = (uint8_t)st;
+            wr32(r + 3, at);
+            wr16(r + 7, piece);
+            len = (uint16_t)(9 + piece);
+            if (state == DL_WAIT) set_state(DL_SEND);
+            if (at + piece > sent) sent = at + piece;
+            last = ts_core->millis();
+        } else if (n == 6 && rd16(p) == seq && (download_busy() || stalled) && !cancel && data && at < size && at <= sent) {
             if (stalled) { stalled = 0; set_state(DL_SEND); info.error[0] = 0; }   /* ожила */
             uint32_t count = size - at;
             if (count > PIECE) count = PIECE;

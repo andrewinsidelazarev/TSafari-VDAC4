@@ -65,6 +65,17 @@ int charset_detect(const char *content_type, const uint8_t *body, size_t len) {
     return bad > multi ? CS_CP1251 : CS_UTF8;
 }
 
+/* Обратный перевод — поиск кода в таблице кодировки (128 кодов, поиск подряд — редкая работа:
+ * только при отправке формы). */
+int charset_from_unicode(int cs, uint32_t c) {
+    if (c < 0x80) return (int)c;
+    if (cs == CS_UTF8) return -1;
+    const uint16_t *t = cs == CS_CP1251 ? charset_cp1251 : cs == CS_KOI8R ? charset_koi8r :
+                        cs == CS_CP866 ? charset_cp866 : charset_cp1252;
+    for (int i = 0; i < 128; i++) if (t[i] == c) return 0x80 + i;
+    return -1;
+}
+
 /* Байт меньше 0x80 — тот же код; больше — код из таблицы; дальше — запись кода в UTF-8
  * (как в ui_url, ui.c). */
 size_t charset_to_utf8(int cs, const uint8_t *in, size_t n, char *out) {

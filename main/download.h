@@ -34,6 +34,18 @@ void download_init(void);
  * из Content-Disposition (если сервер его дал) или из последней части адреса. 0 — уже идёт
  * другое сохранение (body тогда освобождён). */
 int download_start(uint8_t *body, size_t length, const char *url, const char *disposition);
+/* Потоком (файл из сети прямо к Z80 через кольцо в PSRAM, см. download.c): начать — total —
+ * длина из заголовков (0 — неизвестна); 0 — уже идёт другое сохранение или нет памяти.
+ * download_stream_put — дописать принятое (ждёт, пока в кольце появится место; 0 — сохранение
+ * отменено или сорвалось, *abort или выход браузера — сеть пора бросить). download_stream_end —
+ * сеть кончила: ok = 1 — файл весь, иначе error — что случилось. Зовёт задача загрузки. */
+int download_stream_begin(const char *url, const char *disposition, uint32_t total);
+int download_stream_put(const uint8_t *p, size_t n, const volatile int *abort);
+void download_stream_end(int ok, const char *error);
+/* Свободно в кольце, байт (стенд ПК: проверить запись по кругу без второй задачи). */
+uint32_t download_stream_room(void);
+/* Наибольшее кольцо, байт (по умолчанию 2 МБ; стенд ставит своё). */
+void download_stream_ring(uint32_t bytes);
 /* Раз в проход цикла браузера: отправить событие программе Z80, следить за сроками. */
 void download_tick(uint32_t now);
 /* Файл не докачался из сети (ошибка или отмена) — до записи на карту дело не дошло: показать

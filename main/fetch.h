@@ -28,12 +28,20 @@ typedef struct {
     uint8_t *body;             /* PSRAM, до FETCH_LIMIT; живёт до следующей загрузки */
     size_t length;             /* сколько байт в body */
     uint32_t started, took;    /* когда начали и сколько длилось, мс */
+    int streamed;              /* это был файл: он ушёл потоком в download.c (body пуст) */
+    int image;                 /* загружали картинку (fetch_start_image): тело — в body, как у страницы */
 } fetch_result_t;
 
 /* Запустить задачу загрузки. 0 — прошивка без сети или задача не запустилась. */
 int fetch_init(void);
 /* Начать загрузку url (прежняя — отменяется). */
 void fetch_start(const char *url);
+/* Отправить форму способом POST: тело body (len байт, копируется) на адрес url; ответ — как у
+ * загрузки страницы (fetch_poll). POST идёт через сокеты прошивки: http — обычный, https — с TLS
+ * (прошивка ESP 0.1.117+, ABI 1.12; со старой — ошибка с объяснением). */
+void fetch_post(const char *url, const char *body, size_t len);
+/* Загрузить картинку: тело целиком в body, даже если по типу это «файл» (не на карту Evo). */
+void fetch_start_image(const char *url);
 /* Остановить текущую загрузку (кнопка «стоп», Esc). */
 void fetch_cancel(void);
 /* Состояние; FETCH_DONE / FAILED / CANCELLED — один раз, дальше FETCH_IDLE. *r — копия итога. */

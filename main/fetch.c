@@ -18,6 +18,8 @@
 #include <stdio.h>
 #include <string.h>
 #include "fetch.h"
+#include "download.h"
+#include "url.h"
 #include "ts.h"
 
 #define STEP (64u * 1024u)                 /* на столько растёт память под страницу */
@@ -65,6 +67,8 @@ static void finish(int state) {
     ts_core->mutex_unlock(mutex);
 }
 
+static void run_stream(void *st);
+
 /* Загрузить один адрес: открыть соединение (до 15 с), узнать тип содержимого и читать тело
  * порциями: net_read ждёт данных до 300 мс и возвращает число байт, 0 — пока ничего,
  * меньше 0 — конец или обрыв. Между порциями проверяем отмену и остановку браузера. */
@@ -90,7 +94,14 @@ static void run_one(void) {
     snprintf(res.disposition, sizeof(res.disposition), "%s", h ? h : "");
     h = ts_core->net_header(st, "content-length");
     res.total = number(h);
+    /* Сервер мог переадресовать (google.com → www.google.com), и прошивка сама сходила по новому
+     * адресу. Адрес страницы — тот, откуда она пришла: от него считаются относительные ссылки
+     * («/images/…» с google.com — 404, на плате 04.11 не встал логотип). Прошивка 0.1.119+ отдаёт
+     * его как «:url»; старая — NULL, тогда адрес остаётся набранным. */
+    h = ts_core->net_header(st, ":url");
+    if (h && h[0] && strlen(h) < sizeof(res.url)) memcpy(res.url, h, strlen(h) + 1);
     ts_core->mutex_unlock(mutex);
+    if (!res.image && fetch_is_file(res.content_type, res.disposition)) { run_stream(st); return; }
     size_t limit = fetch_is_file(res.content_type, res.disposition) ? FETCH_FILE_LIMIT : FETCH_LIMIT;
     uint32_t last = ts_core->millis();
     for (;;) {
@@ -115,6 +126,234 @@ static void run_one(void) {
     else finish(res.error[0] && !res.length ? FETCH_FAILED : FETCH_DONE);
 }
 
+/* Файл, а не страница: не копить его в памяти, а сразу отдавать на карту Evo через кольцо
+ * download.c (зачем — там). Кольцо полно — download_stream_put ждёт, пока Z80 запишет часть;
+ * сервер тем временем держит соединение (TCP сам притормаживает передачу). */
+static void run_stream(void *st) {
+    static uint8_t chunk[4096];                     /* static — не в стеке задачи загрузки */
+    if (!download_stream_begin(res.url, res.disposition, (uint32_t)res.total)) {
+        snprintf(res.error, sizeof(res.error), "another download is in progress");
+        ts_core->net_close(st);
+        finish(FETCH_FAILED);
+        return;
+    }
+    ts_core->mutex_lock(mutex);
+    res.streamed = 1;
+    ts_core->mutex_unlock(mutex);
+    size_t total = 0;
+    int ok = 1;
+    uint32_t last = ts_core->millis();
+    for (;;) {
+        if (cancel_flag || !__atomic_load_n(&ts_running, __ATOMIC_ACQUIRE)) {
+            ok = 0;
+            snprintf(res.error, sizeof(res.error), "Download cancelled");
+            break;
+        }
+        int n = ts_core->net_read(st, chunk, sizeof(chunk), 300);
+        if (n < 0) break;                                   /* конец или обрыв */
+        if (n == 0) {
+            if ((uint32_t)(ts_core->millis() - last) > IDLE_MS) {
+                ok = 0;
+                snprintf(res.error, sizeof(res.error), "Server stopped sending");
+                break;
+            }
+            continue;
+        }
+        if (!download_stream_put(chunk, (size_t)n, &cancel_flag)) {   /* отменили или карта сорвалась */
+            ok = 0;
+            snprintf(res.error, sizeof(res.error), "Download cancelled");
+            break;
+        }
+        total += (size_t)n;
+        got = total;
+        last = ts_core->millis();
+    }
+    ts_core->net_close(st);
+    if (ok && res.total && total < res.total) {
+        ok = 0;
+        snprintf(res.error, sizeof(res.error), "Connection broke off");
+    }
+    download_stream_end(ok, res.error);
+    ts_log("tsafari: download %s: %u bytes from the network%s", res.url, (unsigned)total, ok ? "" : ", failed");
+    finish(cancel_flag ? FETCH_CANCELLED : ok ? FETCH_DONE : FETCH_FAILED);
+}
+
+/* --- отправка формы POST ---------------------------------------------------------------------
+ * net_open прошивки умеет только GET. POST собираем сами по сокету TCP (sock_open): строка
+ * запроса, заголовки, пустая строка и тело «имя=значение&…». Ответ — заголовки и тело; если
+ * сервер отвечает «смотри другой адрес» (303 и подобные — так почти всегда после POST), идём
+ * туда обычным GET. По HTTPS — тот же запрос через сокет с шифрованием TLS (sock_open_tls,
+ * ABI 1.12, прошивка ESP 0.1.117): сертификат сервера проверяет прошивка, договор TLS идёт в этой
+ * задаче (её стека 6 КБ хватает, как и net_open). Со старой прошивкой POST по HTTPS — ошибка. */
+static char *post_body;                  /* тело текущей отправки (забрано у want_body) */
+static size_t post_len;
+static int want_image;                   /* следующая загрузка — картинка */
+static char *want_body;                  /* тело следующей отправки; NULL — следующая загрузка GET */
+static size_t want_len;
+
+static int sock_ok(void) {
+    return ts_core->size >= offsetof(zm_core_t, sock_close) + sizeof(ts_core->sock_close) && ts_core->sock_open;
+}
+static int tls_ok(void) {
+    return ts_core->size >= offsetof(zm_core_t, sock_open_tls) + sizeof(ts_core->sock_open_tls) && ts_core->sock_open_tls;
+}
+
+/* «http[s]://хост[:порт]/путь» → хост, порт (по умолчанию 80 или 443), путь; *tls = 1 у https.
+ * 0 — не http и не https. */
+static int split_url(const char *url, char *host, size_t cap, uint16_t *port, const char **path, int *tls) {
+    *tls = !strncmp(url, "https://", 8);
+    if (!*tls && strncmp(url, "http://", 7)) return 0;
+    const char *h = url + (*tls ? 8 : 7), *e = h;
+    while (*e && *e != '/' && *e != ':' && *e != '?' && *e != '#') e++;
+    size_t hl = (size_t)(e - h);
+    if (!hl || hl >= cap) return 0;
+    memcpy(host, h, hl);
+    host[hl] = 0;
+    *port = *tls ? 443 : 80;
+    if (*e == ':') {
+        unsigned p = 0;
+        for (e++; *e >= '0' && *e <= '9'; e++) p = p * 10 + (unsigned)(*e - '0');
+        if (p && p < 65536) *port = (uint16_t)p;
+    }
+    *path = *e == '/' ? e : "/";
+    return 1;
+}
+
+/* Значение заголовка name (без учёта регистра) из блока заголовков h (n байт) — в out. */
+static int header_value(const char *h, size_t n, const char *name, char *out, size_t cap) {
+    size_t nl = strlen(name);
+    for (size_t i = 0; i + nl < n; i++) {
+        if (i && h[i - 1] != '\n') continue;
+        size_t k = 0;
+        while (k < nl && (h[i + k] | 0x20) == (name[k] | 0x20)) k++;
+        if (k < nl || h[i + nl] != ':') continue;
+        size_t a = i + nl + 1, b;
+        while (a < n && h[a] == ' ') a++;
+        for (b = a; b < n && h[b] != '\r' && h[b] != '\n'; b++) {}
+        size_t len = b - a < cap - 1 ? b - a : cap - 1;
+        memcpy(out, h + a, len);
+        out[len] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+/* Тело кусками «chunked» (длина шестнадцатеричным числом, строка, кусок, … до длины 0) —
+ * склеить на месте. Возвращает новую длину. */
+static size_t unchunk(uint8_t *b, size_t n) {
+    size_t i = 0, o = 0;
+    while (i < n) {
+        size_t len = 0;
+        int digits = 0;
+        for (; i < n; i++) {
+            int c = b[i], d = c >= '0' && c <= '9' ? c - '0' : (c | 0x20) >= 'a' && (c | 0x20) <= 'f' ? (c | 0x20) - 'a' + 10 : -1;
+            if (d < 0) break;
+            len = len * 16 + (size_t)d;
+            digits++;
+        }
+        while (i < n && b[i] != '\n') i++;                  /* до конца строки длины */
+        i++;
+        if (!digits || !len || i >= n) break;
+        if (len > n - i) len = n - i;
+        memmove(b + o, b + i, len);
+        o += len;
+        i += len + 2;                                       /* кусок и его «\r\n» */
+    }
+    return o;
+}
+
+static void run_one(void);
+
+static void run_post(void) {
+    /* static — не в стеке задачи загрузки: после «смотри другой адрес» отсюда идёт run_one, а в
+     * нём — договор о шифровании HTTPS, которому нужен почти весь стек (6 КБ) */
+    static char head[640 + sizeof(res.url)], host[128], port_s[8], v[sizeof(res.url)], next[sizeof(res.url)];
+    uint16_t port;
+    const char *path;
+    int tls;
+    if (!sock_ok() || !split_url(res.url, host, sizeof(host), &port, &path, &tls)) {
+        snprintf(res.error, sizeof(res.error), "cannot send this form");
+        finish(FETCH_FAILED);
+        return;
+    }
+    if (tls && !tls_ok()) {
+        snprintf(res.error, sizeof(res.error), "POST over HTTPS needs ESP firmware 0.1.117 or newer");
+        finish(FETCH_FAILED);
+        return;
+    }
+    int s = tls ? ts_core->sock_open_tls(host, port, 15000) : ts_core->sock_open(0, host, port, 15000);
+    if (s < 0) {
+        snprintf(res.error, sizeof(res.error), "%s", tls ? "no connection or bad certificate" : "no connection");
+        finish(cancel_flag ? FETCH_CANCELLED : FETCH_FAILED);
+        return;
+    }
+    port_s[0] = 0;
+    if (port != (tls ? 443 : 80)) snprintf(port_s, sizeof(port_s), ":%u", (unsigned)port);
+    int hn = snprintf(head, sizeof(head),
+                      "POST %s HTTP/1.0\r\nHost: %s%s\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+                      "Content-Length: %u\r\n" EXTRA "Connection: close\r\n\r\n",
+                      path, host, port_s, (unsigned)post_len);
+    int ok = hn > 0 && hn < (int)sizeof(head) && ts_core->sock_send(s, head, (uint32_t)hn) == ZM_OK &&
+             (!post_len || ts_core->sock_send(s, post_body, (uint32_t)post_len) == ZM_OK);
+    uint32_t last = ts_core->millis();
+    while (ok) {                                            /* ответ целиком: заголовки и тело */
+        if (cancel_flag || !__atomic_load_n(&ts_running, __ATOMIC_ACQUIRE)) break;
+        if (res.length == cap) {
+            if (cap >= FETCH_LIMIT) { snprintf(res.error, sizeof(res.error), "page is larger than 2 MB"); break; }
+            uint8_t *p = ts_core->realloc(res.body, cap + STEP);
+            if (!p) { snprintf(res.error, sizeof(res.error), "no memory for the page"); break; }
+            res.body = p;
+            cap += STEP;
+        }
+        int n = ts_core->sock_recv(s, res.body + res.length, (uint32_t)(cap - res.length), 300);
+        if (n < 0) break;
+        if (n > 0) { res.length += (size_t)n; got = res.length; last = ts_core->millis(); continue; }
+        if ((uint32_t)(ts_core->millis() - last) > IDLE_MS) { snprintf(res.error, sizeof(res.error), "server stopped sending"); break; }
+    }
+    ts_core->sock_close(s);
+    if (cancel_flag) { finish(FETCH_CANCELLED); return; }
+    if (!ok) { snprintf(res.error, sizeof(res.error), "cannot send the form"); finish(FETCH_FAILED); return; }
+    /* заголовки ответа: «HTTP/1.1 200 OK», строки «Имя: значение», пустая строка */
+    size_t hend = 0;
+    for (size_t i = 0; i + 3 < res.length; i++)
+        if (res.body[i] == '\r' && res.body[i + 1] == '\n' && res.body[i + 2] == '\r' && res.body[i + 3] == '\n') { hend = i + 4; break; }
+    if (!hend || res.length < 12 || strncmp((const char *)res.body, "HTTP/", 5)) {
+        snprintf(res.error, sizeof(res.error), "bad answer from the server");
+        finish(FETCH_FAILED);
+        return;
+    }
+    const char *h = (const char *)res.body;
+    const char *sp = memchr(h, ' ', hend);
+    int status = sp ? (int)number(sp + 1) : 0;
+    res.status = status;
+    if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) &&
+        header_value(h, hend, "location", v, sizeof(v))) {
+        if (url_resolve(res.url, v, next, sizeof(next))) {   /* ответ — на другом адресе: GET туда */
+            ts_core->mutex_lock(mutex);
+            memcpy(res.url, next, sizeof(res.url));
+            res.length = 0; got = 0;
+            ts_core->mutex_unlock(mutex);
+            run_one();
+            return;
+        }
+    }
+    ts_core->mutex_lock(mutex);
+    snprintf(res.content_type, sizeof(res.content_type), "%.95s", header_value(h, hend, "content-type", v, sizeof(v)) ? v : "text/html");
+    snprintf(res.disposition, sizeof(res.disposition), "%.127s", header_value(h, hend, "content-disposition", v, sizeof(v)) ? v : "");
+    ts_core->mutex_unlock(mutex);
+    int chunked = header_value(h, hend, "transfer-encoding", v, sizeof(v)) && strstr(v, "chunked");
+    memmove(res.body, res.body + hend, res.length - hend);
+    res.length -= hend;
+    if (chunked) res.length = unchunk(res.body, res.length);
+    got = res.length;
+    if (status < 200 || status >= 300) {
+        snprintf(res.error, sizeof(res.error), "HTTP %d", status);
+        finish(FETCH_FAILED);
+        return;
+    }
+    finish(FETCH_DONE);
+}
+
 /* Тело задачи загрузки: ждать сигнала (не дольше 200 мс, чтобы заметить остановку браузера),
  * забрать новый адрес и загрузить. Выходит, когда ts_running станет 0. */
 static void worker(void *arg) {
@@ -124,14 +363,19 @@ static void worker(void *arg) {
         ts_core->mutex_lock(mutex);
         int go = request;
         if (go) {
+            if (post_body) ts_core->free(post_body);       /* тело отправки — забрать себе */
+            post_body = want_body; post_len = want_len;
+            want_body = NULL; want_len = 0;
             request = 0; cancel_flag = 0;
             memcpy(res.url, want, sizeof(res.url));
-            res.state = FETCH_BUSY; res.status = 0; res.length = 0; got = 0;
+            res.state = FETCH_BUSY; res.status = 0; res.length = 0; got = 0; res.streamed = 0;
+            res.image = want_image;
             res.error[0] = 0; res.content_type[0] = 0; res.disposition[0] = 0; res.total = 0;
             res.started = ts_core->millis();
         }
         ts_core->mutex_unlock(mutex);
-        if (go) run_one();
+        if (go && post_body) run_post();
+        else if (go) run_one();
     }
     __atomic_store_n(&worker_done, 1, __ATOMIC_RELEASE);
 }
@@ -159,9 +403,14 @@ int fetch_init(void) {
 
 int fetch_stopped(void) { return __atomic_load_n(&worker_done, __ATOMIC_ACQUIRE); }
 
-void fetch_start(const char *url) {
+/* Новый запрос: адрес и тело (NULL — GET) кладутся под замком вместе, потом задача загрузки
+ * будится — так она не возьмёт адрес без тела. */
+static void start_request(const char *url, char *body, size_t len, int image) {
     ts_core->mutex_lock(mutex);
     snprintf(want, sizeof(want), "%s", url);
+    want_image = image;
+    if (want_body) ts_core->free(want_body);
+    want_body = body; want_len = len;
     if (res.state == FETCH_BUSY) cancel_flag = 1;           /* прежняя — прочь */
     request = 1;
     reported = 1;
@@ -169,13 +418,28 @@ void fetch_start(const char *url) {
 #ifdef TSAFARI_HOST
     request = 0; cancel_flag = 0;
     memcpy(res.url, want, sizeof(res.url));
-    res.state = FETCH_BUSY; res.status = 0; res.length = 0; got = 0;
+    res.state = FETCH_BUSY; res.status = 0; res.length = 0; got = 0; res.streamed = 0;
+    res.image = want_image;
     res.error[0] = 0; res.content_type[0] = 0; res.disposition[0] = 0; res.total = 0;
     res.started = ts_core->millis();
-    run_one();
+    if (post_body) ts_core->free(post_body);
+    post_body = want_body; post_len = want_len;
+    want_body = NULL; want_len = 0;
+    if (post_body) run_post(); else run_one();
 #else
     ts_core->signal_give(wake);
 #endif
+}
+
+void fetch_start(const char *url) { start_request(url, NULL, 0, 0); }
+void fetch_start_image(const char *url) { start_request(url, NULL, 0, 1); }
+
+void fetch_post(const char *url, const char *body, size_t len) {
+    char *copy = ts_alloc(len + 1);
+    if (!copy) return;
+    memcpy(copy, body, len);
+    copy[len] = 0;
+    start_request(url, copy, len, 0);
 }
 
 void fetch_cancel(void) {

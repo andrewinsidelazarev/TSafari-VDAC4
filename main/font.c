@@ -6,26 +6,59 @@
 #include "miniz_tinfl.h"
 
 static uint8_t *atlas;                   /* распакованный атлас в PSRAM, NULL — ещё не распакован */
+static uint8_t *face_atlas[FACE_COUNT];  /* атласы начертаний — распаковываются при первом обращении */
+static uint8_t face_failed[FACE_COUNT];  /* распаковать не вышло — больше не пробовать */
 
-/* Распаковка: tinfl — маленький распаковщик zlib из библиотеки miniz (third_party/miniz).
- * Ему нужна своя рабочая структура (~11 КБ) — берём её на время и сразу отдаём. */
-int font_init(void) {
-    if (atlas) return 1;
-    uint8_t *out = ts_alloc(FONT_L4_BYTES);
+/* Распаковать zlib (in_bytes) в новую память на bytes байт. Распаковка: tinfl — маленький
+ * распаковщик zlib из библиотеки miniz (third_party/miniz). Ему нужна своя рабочая структура
+ * (~11 КБ) — берём её на время и сразу отдаём. NULL — нет памяти или данные испорчены. */
+static uint8_t *inflate(const uint8_t *zdata, size_t in_bytes, size_t bytes) {
+    uint8_t *out = ts_alloc(bytes);
     tinfl_decompressor *inflator = ts_alloc(sizeof(tinfl_decompressor));
-    if (!out || !inflator) return 0;
+    if (!out || !inflator) {
+        if (out) ts_core->free(out);
+        if (inflator) ts_core->free(inflator);
+        return NULL;
+    }
     tinfl_init(inflator);
-    size_t in_bytes = FONT_L4_ZLIB_BYTES, out_bytes = FONT_L4_BYTES;
-    tinfl_status st = tinfl_decompress(inflator, font_l4_zlib, &in_bytes, out, out, &out_bytes,
+    size_t out_bytes = bytes;
+    tinfl_status st = tinfl_decompress(inflator, zdata, &in_bytes, out, out, &out_bytes,
                                        TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
     ts_core->free(inflator);
-    if (st != TINFL_STATUS_DONE || out_bytes != FONT_L4_BYTES) {
+    if (st != TINFL_STATUS_DONE || out_bytes != bytes) {
         ts_log("tsafari: font atlas inflate failed (%d, %u bytes)", (int)st, (unsigned)out_bytes);
         ts_core->free(out);
-        return 0;
+        return NULL;
     }
-    atlas = out;
-    return 1;
+    return out;
+}
+
+int font_init(void) {
+    if (!atlas) atlas = inflate(font_l4_zlib, FONT_L4_ZLIB_BYTES, FONT_L4_BYTES);
+    return atlas != NULL;
+}
+
+/* Номер глифа в атласе начертания: место в отсортированном списке font_sub_glyphs (двоичный
+ * поиск, как в font_lookup). Нет — FONT_NONE. */
+static unsigned sub_slot(unsigned glyph) {
+    unsigned lo = 0, hi = FONT_SUB_GLYPHS;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        if (font_sub_glyphs[mid] < glyph) lo = mid + 1; else hi = mid;
+    }
+    return lo < FONT_SUB_GLYPHS && font_sub_glyphs[lo] == glyph ? lo : FONT_NONE;
+}
+
+const uint8_t *font_glyph_face(unsigned face, unsigned glyph) {
+    if (face == FACE_BODY || face >= FACE_COUNT) return font_glyph(glyph);
+    unsigned slot = sub_slot(glyph);
+    if (slot == FONT_NONE || face_failed[face]) return NULL;
+    const font_face_t *f = &font_faces[face];
+    if (!face_atlas[face] && !(face_atlas[face] = inflate(f->zlib, f->zlib_bytes, f->bytes))) {
+        face_failed[face] = 1;
+        return NULL;
+    }
+    return face_atlas[face] + (size_t)slot * f->stride * f->h;
 }
 
 /* Глиф номер N лежит в атласе с байта N × FONT_GLYPH_BYTES (все клетки одного размера). */

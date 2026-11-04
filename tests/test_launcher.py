@@ -106,12 +106,16 @@ class DownloadEsp(Esp):
     """Браузер скачал файл: со второго вопроса о состоянии — событие E7 [номер, размер, имя];
     куски — ответами F6 на 76 (до 246 байт); итог — 77. NTP (#22) отвечает строкой ntp.
     drop — номера запросов 76, ответ на которые «теряется»; refuse_at — с этого запроса отказ
-    (как при отмене). После итога браузер выходит (состояние 3)."""
-    def __init__(self, payload, name=b"ALTEREGO.ZIP", ntp=b"20261104123456", drop=(), refuse_at=None):
+    (как при отмене); later — номера запросов, на которые ответ «куска ещё нет» (файл идёт из
+    сети потоком); unknown — длины нет (E7 с размером #FFFFFFFF), конец — ответом [3].
+    После итога браузер выходит (состояние 3)."""
+    def __init__(self, payload, name=b"ALTEREGO.ZIP", ntp=b"20261104123456", drop=(), refuse_at=None,
+                 later=(), unknown=False):
         super().__init__(exit_after=10 ** 9)
         self.payload = payload; self.name = name; self.ntp = ntp; self.drop = set(drop)
         self.refuse_at = refuse_at; self.sent_event = False; self.result = None; self.pulls = 0
         self.result_at = 0; self.ntp_asked = 0; self.acks = 0
+        self.later = set(later); self.unknown = unknown; self.later_sent = 0; self.eof_sent = 0
 
     def __call__(self, c, p):
         if c == 0x73:
@@ -120,7 +124,8 @@ class DownloadEsp(Esp):
             out = frame(0xF3, bytes([state, 1]) + bytes(4))
             if not self.sent_event and self.status >= 2:
                 self.sent_event = True
-                out += frame(0xE7, struct.pack("<HI", 7, len(self.payload)) + self.name + b"\0")
+                size = 0xFFFFFFFF if self.unknown else len(self.payload)
+                out += frame(0xE7, struct.pack("<HI", 7, size) + self.name + b"\0")
             return out
         if c == 0x22:                                   # NTP: ГГГГММДДЧЧММСС
             self.ntp_asked += 1
@@ -132,6 +137,12 @@ class DownloadEsp(Esp):
                 return b""                              # кадр не дошёл
             if seq != 7 or (self.refuse_at and self.pulls >= self.refuse_at):
                 return frame(0xF6, struct.pack("<HBIH", seq, 0, 0, 0))
+            if self.pulls in self.later:                    # сеть не успела: «спроси позже»
+                self.later_sent += 1
+                return frame(0xF6, struct.pack("<HBIH", seq, 2, at, 0))
+            if self.unknown and at >= len(self.payload):    # файл без длины кончился
+                self.eof_sent += 1
+                return frame(0xF6, struct.pack("<HBIH", seq, 3, at, 0))
             count = min(246, len(self.payload) - at)
             return frame(0xF6, struct.pack("<HBIH", seq, 1, at, count) + self.payload[at:at + count])
         if c == 0x77 and p[2] == 3:                    # «принято, начинаю» — до первого куска
@@ -369,6 +380,27 @@ class LauncherTest(unittest.TestCase):
         Machine(disk, esp).run()
         self.assertEqual(esp.result[:3], (7, 0, 0))
         self.assertEqual(saved(disk, "2026-11-04", "Игра.trd"), {"Игра.trd": payload})
+
+    def test_download_stream_waits_for_network(self):
+        # файл идёт из сети потоком: на часть запросов «куска ещё нет» — Z80 спрашивает снова,
+        # попытки не тратятся (подряд их больше DL_TRIES), файл — байт в байт
+        payload = bytes((i * 29 + 3) & 255 for i in range(40000))
+        esp = DownloadEsp(payload, later=list(range(1, 9)) + [50, 51, 52, 53, 120])
+        disk = disk_image()
+        Machine(disk, esp).run()
+        self.assertEqual(esp.later_sent, 13)
+        self.assertEqual(esp.result[1:3], (0, 0))
+        self.assertEqual(saved(disk, "2026-11-04", "ALTEREGO.ZIP")["ALTEREGO.ZIP"], payload)
+
+    def test_download_unknown_size_ends_by_eof(self):
+        # сервер не сказал длину: E7 с #FFFFFFFF, конец — ответом [3] на месте конца файла
+        payload = bytes((i * 7 + 1) & 255 for i in range(20000))
+        esp = DownloadEsp(payload, unknown=True)
+        disk = disk_image()
+        Machine(disk, esp).run()
+        self.assertEqual(esp.eof_sent, 1)
+        self.assertEqual(esp.result[1:3], (0, 0))
+        self.assertEqual(saved(disk, "2026-11-04", "ALTEREGO.ZIP")["ALTEREGO.ZIP"], payload)
 
     def test_download_refused_keeps_card_clean(self):
         """Отмена посреди файла: итог 2, под настоящим именем ничего нет (только «имя.$$$»)."""

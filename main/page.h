@@ -21,6 +21,8 @@
 #define RAMG_PAL  0x0E0000u              /* две палитры по 256 × RGB565 */
 
 #define PAGE_UNDERLINE 1u                /* флаг строки текста: подчеркнуть (ссылки) */
+#define PAGE_BOLD      2u                /* жирный: глиф ещё раз на точку правее (дизайн Codex) */
+#define PAGE_STRIKE    4u                /* зачёркнутый (<s>, <del>, text-decoration: line-through) */
 
 /* Начать новую страницу: цвет фона bg (0xRRGGBB), пустой список элементов, новая палитра. */
 void page_begin(uint32_t bg);
@@ -28,10 +30,29 @@ void page_begin(uint32_t bg);
 int page_rect(int x, int y, int w, int h, uint32_t rgb);
 /* Высота прямоугольника, когда она стала известна (фон блока под абзацами). */
 void page_rect_height(int index, int h);
-/* Строка глифов одной строкой (без переноса) с верхом строки y; bg — цвет фона под ней
- * (сглаживание считается к нему). link ≥ 0 — номер ссылки для кликов. */
-void page_text(int x, int y, const uint16_t *glyphs, unsigned count, uint32_t fg, uint32_t bg,
+/* Строка глифов одной строкой (без переноса) начертанием face (font.h); y — верх клетки
+ * начертания (базовая линия — y + font_faces[face].baseline). bg — цвет фона под ней
+ * (сглаживание считается к нему). flags — PAGE_UNDERLINE, PAGE_BOLD. link ≥ 0 — номер ссылки. */
+void page_text(int x, int y, unsigned face, const uint16_t *glyphs, unsigned count, uint32_t fg, uint32_t bg,
                unsigned flags, int link);
+/* Встроенный элемент (поле формы, кнопка, картинка) w×h с левым верхним углом (x, y) и номером
+ * id; bg — цвет фона под ним; link ≥ 0 — он внутри ссылки (картинка-ссылка), иначе −1. Рисует его
+ * не page.c: при каждой отрисовке строк, которые он задевает, зовётся painter(id, x, y, w, h, bg),
+ * и тот рисует функциями page_paint_… (только из painter). */
+int page_widget(int x, int y, int w, int h, int id, uint32_t bg, int link);
+void page_set_painter(void (*paint)(int id, int x, int y, int w, int h, uint32_t bg));
+/* Встроенный элемент под точкой экрана (x, y) — его id или −1. */
+int page_widget_at(int x, int y);
+/* Перерисовать строки страницы [y, y + h), если они есть в кольце (поле формы изменилось).
+ * 0 — отказ LINK. */
+int page_redraw(int y, int h);
+/* Скруглённый прямоугольник (радиус r; w = h = 2r — круг) цвета fg на фоне bg, края сглажены. */
+void page_paint_round(int x, int y, int w, int h, int r, uint32_t fg, uint32_t bg);
+/* Маска L4 w×h (stride байт в строке) — иконка — цветом fg на фоне bg. */
+void page_paint_mask(int x, int y, int w, int h, const uint8_t *l4, int stride, uint32_t fg, uint32_t bg);
+/* Глифы начертания face (y — верх клетки); видно только между clip_left и clip_right. */
+void page_paint_text(int x, int y, unsigned face, const uint16_t *g, unsigned n, uint32_t fg, uint32_t bg,
+                     unsigned flags, int clip_left, int clip_right);
 /* Высота страницы (по нижнему краю последнего элемента). */
 int page_height(void);
 /* Ссылка под точкой экрана (x, y при текущей прокрутке) или −1. */
@@ -47,3 +68,5 @@ int page_top(void);
 void page_dl(ft_dl_t *d);
 /* Цвет фона страницы (0xRRGGBB). */
 uint32_t page_bg(void);
+/* Сменить фон страницы, пока на ней ничего не нарисовано (<body bgcolor=…>). */
+void page_set_bg(uint32_t bg);
