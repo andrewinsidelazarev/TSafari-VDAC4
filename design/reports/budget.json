@@ -1,0 +1,81 @@
+{
+  "kind": "Этап 3: точные размеры ресурсов, проектная оценка DL без платы",
+  "ram_g_total_bytes": 80120,
+  "ram_g_ui_region_bytes": 52784,
+  "ram_g_ui_region_capacity": 61440,
+  "ram_g_ui_region_free": 8656,
+  "ram_g_address_bytes": 11016,
+  "ram_g_download_bytes": 16320,
+  "dl_worst_with_reserve": 250,
+  "dl_reserve_words": 24,
+  "dl_download_components": {
+    "context": 2,
+    "panel": 6,
+    "text_bitmap": 8,
+    "state_and_action_icons": 9,
+    "bar": 8,
+    "hover": 4
+  },
+  "dl_states": {
+    "idle": 29,
+    "navigation": 87,
+    "status_bitmap": 113,
+    "address_bitmap": 121,
+    "address_language": 130,
+    "suggestions": 172,
+    "suggestions_js": 188,
+    "wifi_modal": 96,
+    "download_and_cursor_tint_extra": 38,
+    "maximum_before_reserve": 226
+  },
+  "allocation": {
+    "page_ring": {
+      "base": 0,
+      "end": 917504,
+      "format": "PALETTED565",
+      "width": 1024,
+      "rows": 896,
+      "stride": 1024,
+      "bytes": 917504
+    },
+    "page_palettes": {
+      "base": 917504,
+      "count": 2,
+      "colors": 256,
+      "bytes_each": 512,
+      "note": "Вторая палитра указана в прочитанном main/page.h"
+    },
+    "ui_region": {
+      "base": 921600,
+      "end": 983040,
+      "bytes": 61440
+    },
+    "reserve": {
+      "base": 972656,
+      "end": 973680,
+      "bytes": 1024
+    },
+    "ui_free": {
+      "base": 974384,
+      "end": 983040,
+      "bytes": 8656
+    },
+    "address_region": {
+      "base": 983040,
+      "end": 994056,
+      "bytes": 11016
+    },
+    "download_region": {
+      "base": 999424,
+      "end": 1015744,
+      "limit": 1015808,
+      "bytes": 16320,
+      "free": 64
+    }
+  },
+  "page_benchmark_ms": {
+    "PALETTED565": 12.5,
+    "RGB565": 17.0,
+    "source": "Сообщение пользователя; замер здесь не повторялся"
+  }
+}

@@ -1,0 +1,964 @@
+{
+  "stage": 3,
+  "preview_count": 62,
+  "previews": [
+    {
+      "file": "01_page.png",
+      "title": "Покой: только полупрозрачный глобус",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "01a_top_left_link.png",
+      "title": "Верхняя ссылка кликабельна; панель скрыта",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "01b_navigation_025.png",
+      "title": "Горячий угол: выезд кнопок 25%",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "01c_navigation_050.png",
+      "title": "Горячий угол: выезд кнопок 50%",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "01d_navigation_100.png",
+      "title": "Горячий угол: выезд кнопок 100%",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "01e_address_025.png",
+      "title": "Выезд адреса из-под глобуса 25%",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "01f_address_050.png",
+      "title": "Выезд адреса из-под глобуса 50%",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "01g_address_075.png",
+      "title": "Выезд адреса из-под глобуса 75%",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "01h_globe_hover.png",
+      "title": "Наведение на глобус: кнопки остаются скрыты",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "02_link_hover.png",
+      "title": "Ссылка под курсором",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "02b_long_link.png",
+      "title": "Длинный URL в статусе",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "03_address_edit.png",
+      "title": "Адрес, выделение и каретка",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "03b_long_address.png",
+      "title": "Длинный адрес: горизонтальная прокрутка",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "04_address_suggestions.png",
+      "title": "История и закладки",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "05_loading.png",
+      "title": "Загрузка; выдвинутые кнопки и активный Stop",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "05b_loading_idle.png",
+      "title": "Загрузка при скрытых кнопках",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "06a_first_page.png",
+      "title": "Назад и вперёд недоступны",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "06b_button_hover.png",
+      "title": "Кнопка Reload под курсором",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "06c_button_pressed.png",
+      "title": "Кнопка Reload нажата",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "07_scroll_drag.png",
+      "title": "Перетаскивание тонкой полосы прокрутки",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "07a_scroll_hover.png",
+      "title": "Полоса появляется у правого края",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "07b_scroll_idle.png",
+      "title": "После прокрутки полоса снова скрыта",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "08a_typography.png",
+      "title": "h1–h3, жирность, ссылки, списки, цитата",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "08b_tables_images.png",
+      "title": "Таблица и три состояния изображений",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "08c_code_forms.png",
+      "title": "Код, черта и элементы форм",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "09_home.png",
+      "title": "Стартовая страница",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "10a_error_offline.png",
+      "title": "No network connection",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "10b_error_dns.png",
+      "title": "Address not found",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "10c_error_tls.png",
+      "title": "Secure connection failed",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "10d_error_404.png",
+      "title": "This page is missing",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "11a_js_required.png",
+      "title": "Предложение JS-сервиса",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "11b_js_active.png",
+      "title": "Страница через JS-сервис; метка внизу",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "12a_download.png",
+      "title": "Скачивание с известным размером",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "12b_download_unknown.png",
+      "title": "Скачивание без известного размера",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "12c_download_done.png",
+      "title": "Файл сохранён",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "13_settings.png",
+      "title": "Настройки JS-сервиса, домашней страницы и поиска",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "13b_settings_entry.png",
+      "title": "Вход в настройки из адресной строки",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "14a_wifi_connecting.png",
+      "title": "Старт: подключение к Wi-Fi",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "14b_wifi_unavailable.png",
+      "title": "Wi-Fi недоступен: автоповтор и выход F12",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "14c_wifi_ready.png",
+      "title": "Сеть появилась: окно закрыто, стартовая страница",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "15a_input_en.png",
+      "title": "Латиница / EN: каретка после vtrd.in",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "15b_input_ru.png",
+      "title": "Русская раскладка / RU: каретка после vtrd.in",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "15c_input_language_detail.png",
+      "title": "Метки EN/RU: размер 1:1 и увеличение 8x",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_01_download_known.png",
+      "title": "Скачивание: известен объём",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_02_download_unknown.png",
+      "title": "Скачивание: неизвестен объём",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_03_download_writing.png",
+      "title": "Получено из сети: запись на карту Evo",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_04_download_done.png",
+      "title": "Сохранено: путь, автоскрытие через 5 с",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_05_download_no_space.png",
+      "title": "Ошибка: нет места на карте",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_06_download_sd_error.png",
+      "title": "Ошибка записи на SD",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_07_download_network_error.png",
+      "title": "Ошибка сети",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_08_download_hover_cancel.png",
+      "title": "Наведение на отмену сетевого скачивания",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_09_download_long_name.png",
+      "title": "Имя до 48 знаков: сохранено расширение",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_10_download_coexist.png",
+      "title": "Плашка, статус ссылки, JS и прокрутка",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_11_download_done_long_hover.png",
+      "title": "Длинный путь: чтение имени при наведении",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_12_download_cancelled.png",
+      "title": "Скачивание отменено",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_20_cursor_paper_link.png",
+      "title": "Курсор: светлая бумага, link",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_21_cursor_paper_visited.png",
+      "title": "Курсор: светлая бумага, visited",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_22_cursor_paper_text.png",
+      "title": "Курсор: светлая бумага, text",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_23_cursor_dark_link.png",
+      "title": "Курсор: #330066, link",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_24_cursor_dark_visited.png",
+      "title": "Курсор: #330066, visited",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_25_cursor_dark_text.png",
+      "title": "Курсор: #330066, text",
+      "size": [
+        1024,
+        768
+      ]
+    },
+    {
+      "file": "16_26_cursor_detail_8x.png",
+      "title": "Курсор 8x: исходный ARGB4 и умножение COLOR_RGB",
+      "size": [
+        1024,
+        768
+      ]
+    }
+  ],
+  "icons": [
+    {
+      "file": "back.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "bookmark.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "check.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "chevron.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "close.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "cursor_zuma.png",
+      "size": [
+        38,
+        38
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "download.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "forward.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_00.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_01.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_02.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_03.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_04.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_05.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_06.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_07.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_08.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_09.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_10.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_11.png",
+      "size": [
+        32,
+        32
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "globe_strip.png",
+      "size": [
+        32,
+        384
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "go.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "history.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "image.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "input_en.png",
+      "size": [
+        32,
+        22
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "input_ru.png",
+      "size": [
+        32,
+        22
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "js_label.png",
+      "size": [
+        24,
+        34
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "reload.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "search.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "service.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "settings.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "stop.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "warning.png",
+      "size": [
+        24,
+        24
+      ],
+      "mode": "RGBA"
+    },
+    {
+      "file": "wifi_title.png",
+      "size": [
+        144,
+        55
+      ],
+      "mode": "RGBA"
+    }
+  ],
+  "font_sha256": "d9e2b23d19f8230be7146f409a52b1d23117e635e28f2e2892cf91b7382f325b",
+  "cursor_sha256": "26fae75194dbcfbe72698e18b54556f3970ee8447791ba4ea234bfe94f490588",
+  "palette": {
+    "paper": {
+      "rgb565": "0xF79C",
+      "display_rgb": [
+        247,
+        243,
+        231
+      ]
+    },
+    "white": {
+      "rgb565": "0xFFFE",
+      "display_rgb": [
+        255,
+        255,
+        247
+      ]
+    },
+    "ink": {
+      "rgb565": "0x21A7",
+      "display_rgb": [
+        33,
+        52,
+        57
+      ]
+    },
+    "muted": {
+      "rgb565": "0x534E",
+      "display_rgb": [
+        82,
+        105,
+        115
+      ]
+    },
+    "line": {
+      "rgb565": "0xCEBA",
+      "display_rgb": [
+        206,
+        215,
+        214
+      ]
+    },
+    "soft": {
+      "rgb565": "0xE75B",
+      "display_rgb": [
+        231,
+        235,
+        222
+      ]
+    },
+    "navy": {
+      "rgb565": "0x1146",
+      "display_rgb": [
+        16,
+        40,
+        49
+      ]
+    },
+    "panel": {
+      "rgb565": "0x21E9",
+      "display_rgb": [
+        33,
+        60,
+        74
+      ]
+    },
+    "edge": {
+      "rgb565": "0x3ACC",
+      "display_rgb": [
+        57,
+        89,
+        99
+      ]
+    },
+    "mint": {
+      "rgb565": "0x76F8",
+      "display_rgb": [
+        115,
+        223,
+        198
+      ]
+    },
+    "amber": {
+      "rgb565": "0xF5EE",
+      "display_rgb": [
+        247,
+        190,
+        115
+      ]
+    },
+    "ui_text": {
+      "rgb565": "0xEFBD",
+      "display_rgb": [
+        239,
+        247,
+        239
+      ]
+    },
+    "ui_muted": {
+      "rgb565": "0xB639",
+      "display_rgb": [
+        181,
+        199,
+        206
+      ]
+    },
+    "disabled": {
+      "rgb565": "0x63B0",
+      "display_rgb": [
+        99,
+        117,
+        132
+      ]
+    },
+    "hover": {
+      "rgb565": "0x32AC",
+      "display_rgb": [
+        49,
+        85,
+        99
+      ]
+    },
+    "pressed": {
+      "rgb565": "0x3AEC",
+      "display_rgb": [
+        57,
+        93,
+        99
+      ]
+    },
+    "selection": {
+      "rgb565": "0x336E",
+      "display_rgb": [
+        49,
+        109,
+        115
+      ]
+    },
+    "link": {
+      "rgb565": "0x0B6E",
+      "display_rgb": [
+        8,
+        109,
+        115
+      ]
+    },
+    "visited": {
+      "rgb565": "0x72B1",
+      "display_rgb": [
+        115,
+        85,
+        140
+      ]
+    },
+    "link_bg": {
+      "rgb565": "0xD75B",
+      "display_rgb": [
+        214,
+        235,
+        222
+      ]
+    },
+    "red": {
+      "rgb565": "0xAA27",
+      "display_rgb": [
+        173,
+        69,
+        57
+      ]
+    },
+    "error_bg": {
+      "rgb565": "0xF6FA",
+      "display_rgb": [
+        247,
+        223,
+        214
+      ]
+    },
+    "code": {
+      "rgb565": "0xE73B",
+      "display_rgb": [
+        231,
+        231,
+        222
+      ]
+    }
+  }
+}

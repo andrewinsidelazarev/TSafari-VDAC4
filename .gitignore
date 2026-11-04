@@ -1,0 +1,12 @@
+# Сборка ESP-IDF, программы Z80 и стенда ПК
+build/
+*.log
+__pycache__/
+*.pyc
+third_party/fat32/build/
+third_party/fat32/.git/
+
+# Генерирует ESP-IDF (исходное — sdkconfig.defaults)
+sdkconfig
+sdkconfig.old
+dependencies.lock

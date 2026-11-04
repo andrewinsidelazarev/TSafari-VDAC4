@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Тест TSafari &mdash; разбор HTML</title>
+<style>body { color: red }</style><script>document.write("JS не выполняется");</script></head>
+<body>
+<h1>Заголовок первого уровня</h1>
+<p>Обычный абзац: <b>жирный</b>, <i>курсив</i>, сущности &laquo;ёлочки&raquo;, &copy; 2026, 5&nbsp;кг,
+&#8470;&nbsp;1, &#x2192; стрелка. Длинная строка для переноса по словам: ZX Evolution — компьютер,
+совместимый с ZX Spectrum 128, на ПЛИС; TS-Conf добавляет графику, спрайты и DMA.</p>
+<p>Ссылки: <a href="cp1251.html">страница в Windows-1251</a>, <a href="/koi.koi8">в KOI8-R</a>,
+<a href="sub/../missing.html">несуществующая</a>, <a href="mailto:x@y.z">почта</a> (не ссылка),
+<a href="#top">якорь</a>.</p>
+<h2>Списки</h2>
+<ul><li>первый пункт</li><li>второй пункт с <a href="https://test.local/index.html">ссылкой</a></li>
+<li>вложенный:<ol><li>раз</li><li>два</li><li value="10">десять</li></ol></li></ul>
+<blockquote>Цитата с отступом: любопытство не измеряется мегагерцами.</blockquote>
+<pre>
+10 PRINT "HELLO"
+20 GOTO 10
+
+  отступ в pre сохраняется
+</pre>
+<table><tr><th>Машина</th><th>Процессор</th></tr><tr><td>ZX Spectrum</td><td>Z80</td></tr>
+<tr><td>Amiga</td><td>68000</td></tr></table>
+<hr>
+<form>Поиск: <input type="text" placeholder="запрос"> <input type="submit" value="Найти">
+<input type="checkbox" checked> да <input type="radio"> нет <input type="hidden" value="x">
+<select><option>один</option><option>два</option></select></form>
+<p>Картинка: <img src="pic.png" alt="ZX Spectrum 48K"> и без подписи <img src="x.gif">.</p>
+<noscript>Этот текст виден: JS в TSafari не выполняется.</noscript>
+<!-- комментарий не виден -->
+<p>Конец страницы &amp; всё.</p>
+</body></html>
