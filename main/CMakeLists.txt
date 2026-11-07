@@ -4,9 +4,12 @@ file(GLOB WEBP_SOURCES "${CMAKE_CURRENT_LIST_DIR}/../third_party/libwebp/src/dec
                        "${CMAKE_CURRENT_LIST_DIR}/../third_party/libwebp/src/utils/*.c")
 idf_component_register(
     SRCS app.c ft.c font.c font_data.c page.c doc.c demo.c ui.c ui_data.c input.c
-         url.c fetch.c download.c charset.c charset_data.c html.c form.c image.c gif.c
+         url.c fetch.c download.c imgcache.c charset.c charset_data.c html.c form.c image.c gif.c svg.c svg_lib.c
          ../third_party/miniz/miniz_tinfl.c ${WEBP_SOURCES}
-    INCLUDE_DIRS "." "../include" "../design" "../third_party/miniz" "../third_party/libwebp")
+    INCLUDE_DIRS "." "../include" "../design" "../third_party/miniz" "../third_party/libwebp"
+                 "../third_party/nanosvg")
+# nanosvg (third_party/nanosvg/README.md): чужой код в svg_lib.c — без предупреждений
+set_source_files_properties(svg_lib.c PROPERTIES COMPILE_OPTIONS "-w")
 # libwebp: без SSE/NEON (src/webp/config.h), 16-битные точки — младшим байтом вперёд, как у FT812;
 # malloc/free — функции браузера (webp_alloc.h); предупреждения чужого кода — не ошибки
 set_source_files_properties(${WEBP_SOURCES} PROPERTIES

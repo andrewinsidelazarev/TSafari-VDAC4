@@ -696,9 +696,10 @@ static int AllocateMemory(VP8Decoder* const dec) {
   const size_t cache_height = (16 * num_caches
                             + kFilterExtraRows[dec->filter_type_]) * 3 / 2;
   const size_t cache_size = top_size * cache_height;
-  // alpha_size is the only one that scales as width x height.
-  const uint64_t alpha_size = (dec->alpha_data_ != NULL) ?
-      (uint64_t)dec->pic_hdr_.width_ * dec->pic_hdr_.height_ : 0ULL;
+  // VDAC4: плоскость прозрачности берёт alpha_dec.c (AllocateAlphaPlane) — окном строк, а этот
+  // резерв на всю картинку (у 2560×2560 — 6,5 МБ) libwebp 1.5.0 не использует: alpha_plane_
+  // отсюда сразу перезаписывается.
+  const uint64_t alpha_size = 0ULL;
   const uint64_t needed = (uint64_t)intra_pred_mode_size
                         + top_size + mb_info_size + f_info_size
                         + yuv_size + mb_data_size

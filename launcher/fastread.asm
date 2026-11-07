@@ -12,6 +12,9 @@
 ; Directory traversal is finished before its parent-frame RAM is reused.
 FastExtents equ #C400
 FastMaxExtents equ (#10000-FastExtents)/8
+; Сколько записей карты помещается: у ELF — до #FFFF; у файла кэша картинок (imgcache.asm) — до
+; #DFFF: с #E000 у него порция DMA. Задаёт вызывающий перед FastOpen.
+FastExtMax: dw FastMaxExtents
 
 FastOpen:
         xor a
@@ -131,7 +134,7 @@ FastAppend:
         ret
 .new:
         ld hl,(FastCount)
-        ld de,FastMaxExtents
+        ld de,(FastExtMax)
         or a
         sbc hl,de
         jr nc,.full
@@ -210,6 +213,33 @@ FastReadAt:
         rr l
         ld (FastSector),hl
 .loop:
+        ld hl,(FastByte)                ; целый сектор с начала — прямо в приёмник
+        ld a,h
+        or l
+        jr nz,.buffered
+        ld hl,(FastRemaining)
+        ld de,512
+        or a
+        sbc hl,de
+        jr c,.buffered
+        call FastReadDirect
+        ret nz
+        ld hl,(FastDest)
+        ld de,512
+        add hl,de
+        ld (FastDest),hl
+        ld hl,(FastRemaining)
+        or a
+        sbc hl,de
+        ld (FastRemaining),hl
+        ld a,h
+        or l
+        ret z
+        ld hl,(FastSector)
+        inc hl
+        ld (FastSector),hl
+        jr .loop
+.buffered:
         call FastReadSector
         ret nz
         ld hl,512
@@ -246,7 +276,62 @@ FastReadAt:
         ld hl,(FastSector)
         inc hl
         ld (FastSector),hl
-        jr .loop
+        jp .loop
+
+; Сектор FastSector — прямо по адресу FastDest (не в ScanBuffer). Z — прочитан.
+FastReadDirect:
+        xor a
+        ld (FastCacheValid),a           ; ScanBuffer не тронут, но его сектор — уже не «последний»
+        call FastLookup
+        ret nz
+        ld bc,(FastDest)
+        call ScanReadLba
+        ret nz
+        xor a
+        ret
+
+; LBA сектора FastSector — в ScanLba по карте. Z — найден.
+FastLookup:
+        ld hl,0
+.find:
+        ld de,(FastCount)
+        push hl
+        or a
+        sbc hl,de
+        pop hl
+        jp nc,FastBad
+        call FastAddress
+        push hl
+        ld hl,(FastSector)
+        ld e,(ix+0)
+        ld d,(ix+1)
+        or a
+        sbc hl,de
+        jr c,.next
+        ld e,(ix+2)
+        ld d,(ix+3)
+        push hl
+        or a
+        sbc hl,de
+        pop hl
+        jr nc,.next
+        ld e,(ix+4)
+        ld d,(ix+5)
+        add hl,de
+        ld (ScanLba),hl
+        ld l,(ix+6)
+        ld h,(ix+7)
+        jr nc,.lba
+        inc hl
+.lba:
+        ld (ScanLba+2),hl
+        pop hl
+        xor a
+        ret
+.next:
+        pop hl
+        inc hl
+        jr .find
 
 ; R-Type's ReadFileSector lookup, plus a last-sector cache for unaligned
 ; 1016-byte protocol chunks that overlap a physical sector.

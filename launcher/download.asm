@@ -50,7 +50,7 @@ ServeDownload:
         ld de,7
         or a
         sbc hl,de
-        jp c,.ignore                    ; короче [номер, размер, 0] — не наше
+        jp c,DlWrite.ignore             ; короче [номер, размер, 0] — не наше
         ld hl,(ProtoBuf)
         ld (DlSeq),hl
         ld hl,(ProtoBuf+2)
@@ -71,14 +71,18 @@ ServeDownload:
         xor a
         ld (de),a
 .named:
+        xor a                           ; загрузка — в каталог даты
+        ld (DlToCache),a
         ld a,(FILE_NAME)
         or a
-        jr nz,.place
+        jr nz,DlWrite
         ld hl,fat_name_default          ; пустое имя — «download»
         ld de,FILE_NAME
         ld bc,fat_name_default_end-fat_name_default
         ldir
-.place:
+; Записать файл FILE_NAME размером DlSize (номер — DlSeq): загрузку — в \zifi\downloads\дата,
+; картинку кэша (DlToCache = 1, imgcache.asm) — в Cache\Images. Выход: A = 0.
+DlWrite:
         xor a
         ld (DlOpen),a
         ld a,3                          ; «принято, начинаю»
@@ -87,8 +91,15 @@ ServeDownload:
         ld a,DL_PAGE                    ; буфер — в окне #C000
         ld bc,#13AF
         out (c),a
+        ld a,(DlToCache)
+        or a
+        jr z,.dated
+        call CacheDir                   ; Cache\Images стал текущим
+        jr .dir
+.dated:
         call DlDate                     ; DIR_date: по NTP или по часам Evo
         call fat_download_dir           ; каталог даты стал текущим
+.dir:
         jp nz,.card
         ld hl,0                         ; APPEND пишет ровно столько, сколько принято
         ld (FILE+1),hl
@@ -397,6 +408,7 @@ DlAt: dd 0                              ; сколько уже получено
 DlFill: dw 0                            ; сколько в буфере
 DlTries: db 0
 DlOpen: db 0                            ; «имя.$$$» открыт
+DlToCache: db 0                         ; 1 — пишется картинка кэша (Cache\Images), не загрузка
 DlDateKnown: db 0                       ; дата получена по NTP
 DlReq: ds 6                             ; запрос 76
 DlResult: ds 14                         ; доклад 77

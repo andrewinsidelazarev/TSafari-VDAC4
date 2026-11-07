@@ -263,6 +263,9 @@ struct VP8Decoder {
   uint8_t* alpha_plane_mem_;  // memory allocated for alpha_plane_
   uint8_t* alpha_plane_;      // output. Persistent, contains the whole data.
   const uint8_t* alpha_prev_line_;  // last decoded alpha row (or NULL)
+  int alpha_row0_;            // VDAC4: alpha_plane_ — окно строк начиная с этой,
+  int alpha_rows_;            // столько строк в окне (у полной плоскости — вся высота)
+  int alpha_keep_;            // VDAC4: столько прошлых строк держать при сдвиге окна
   int alpha_dithering_;       // derived from decoding options (0=off, 100=full)
 };
 

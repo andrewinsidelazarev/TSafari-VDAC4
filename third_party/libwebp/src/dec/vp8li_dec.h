@@ -66,6 +66,8 @@ struct VP8LDecoder {
   uint32_t*        pixels_;        // Internal data: either uint8_t* for alpha
                                    // or uint32_t* for BGRA.
   uint32_t*        argb_cache_;    // Scratch buffer for temporary BGRA storage.
+  int              ring_px_;       // VDAC4: pixels_ — кольцо из стольких точек (целые пачки
+                                   // строк), а не вся картинка; 0 — вся картинка, как в libwebp
 
   VP8LBitReader    br_;
   int              incremental_;   // if true, incremental decoding is expected

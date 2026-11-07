@@ -97,6 +97,8 @@ Start:
         ld de,Query+5
         ld bc,4
         ldir
+        ld hl,FastMaxExtents            ; карта ELF — до #FFFF
+        ld (FastExtMax),hl
         call FastOpen
         jr z,.mapped
         ld hl,MsgReadError
@@ -246,6 +248,8 @@ Run:
         jr nc,.keys
         cp #E7
         call z,ServeDownload            ; возвращает A = 0: дальше не совпадёт
+        cp #E8
+        call z,ServeCache               ; кэш картинок (imgcache.asm), тоже A = 0
         cp #F3                          ; состояние браузера: 3 — вышел по F12, FF — ошибка
         jr nz,.keys
         ld a,(ProtoBuf)
@@ -451,6 +455,7 @@ PutBuf: ds 1020                         ; кусок ELF: 4 байта смещ�
         INCLUDE "diagnostic.asm"
         INCLUDE "ftscreen.asm"
         INCLUDE "download.asm"
+        INCLUDE "imgcache.asm"
         INCLUDE "zifi_link.asm"
         INCLUDE "proto.asm"
 CodeEnd:

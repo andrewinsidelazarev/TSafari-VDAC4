@@ -805,10 +805,47 @@ static void ApplyInverseTransforms(VP8LDecoder* const dec,
   }
 }
 
+// VDAC4: место точки номер pos в pixels_ — в кольце строк или во всей картинке. Пачка строк
+// (до NUM_ARGB_CACHE_ROWS, с границы, кратной ей) в кольце не рвётся: кольцо — целые пачки.
+static WEBP_INLINE int RingPos(const VP8LDecoder* const dec, int pos) {
+  return dec->ring_px_ > 0 ? pos % dec->ring_px_ : pos;
+}
+
+// VDAC4: копия ссылки назад по кольцу. Источник ещё в кольце (dist меньше кольца), и запись не
+// затирает строки, которые ещё не обработаны (от last_row_). Нет — ссылка дальше кольца: ошибка.
+static int RingCopy32b(const VP8LDecoder* const dec, uint32_t* const data,
+                       int pos, int dist, int length) {
+  const int ring = dec->ring_px_;
+  int d = pos % ring, s;
+  if (dist >= ring || pos + length - dec->width_ * dec->last_row_ > ring) return 0;
+  s = (pos - dist) % ring;
+  while (length-- > 0) {
+    data[d] = data[s];
+    if (++d == ring) d = 0;
+    if (++s == ring) s = 0;
+  }
+  return 1;
+}
+
+static int RingCopy8b(const VP8LDecoder* const dec, uint8_t* const data,
+                      int pos, int dist, int length) {
+  const int ring = dec->ring_px_;
+  int d = pos % ring, s;
+  if (dist >= ring || pos + length - dec->width_ * dec->last_row_ > ring) return 0;
+  s = (pos - dist) % ring;
+  while (length-- > 0) {
+    data[d] = data[s];
+    if (++d == ring) d = 0;
+    if (++s == ring) s = 0;
+  }
+  return 1;
+}
+
 // Processes (transforms, scales & color-converts) the rows decoded after the
 // last call.
 static void ProcessRows(VP8LDecoder* const dec, int row) {
-  const uint32_t* const rows = dec->pixels_ + dec->width_ * dec->last_row_;
+  const uint32_t* const rows =
+      dec->pixels_ + RingPos(dec, dec->width_ * dec->last_row_);  // VDAC4: кольцо
   const int num_rows = row - dec->last_row_;
 
   assert(row <= dec->io_->crop_bottom);
@@ -897,9 +934,10 @@ static void ExtractPalettedAlphaRows(VP8LDecoder* const dec, int last_row) {
   if (last_row > first_row) {
     // Special method for paletted alpha data. We only process the cropped area.
     const int width = dec->io_->width;
-    uint8_t* out = alph_dec->output_ + width * first_row;
+    uint8_t* out = alph_dec->output_ +
+                   width * (first_row - alph_dec->output_row0_);  // VDAC4: окно
     const uint8_t* const in =
-      (uint8_t*)dec->pixels_ + dec->width_ * first_row;
+      (uint8_t*)dec->pixels_ + RingPos(dec, dec->width_ * first_row);  // VDAC4
     VP8LTransform* const transform = &dec->transforms_[0];
     assert(dec->next_transform_ == 1);
     assert(transform->type_ == COLOR_INDEXING_TRANSFORM);
@@ -1060,7 +1098,7 @@ static int DecodeAlphaData(VP8LDecoder* const dec, uint8_t* const data,
     VP8LFillBitWindow(br);
     code = ReadSymbol(htree_group->htrees[GREEN], br);
     if (code < NUM_LITERAL_CODES) {  // Literal
-      data[pos] = code;
+      data[RingPos(dec, pos)] = code;  // VDAC4: кольцо
       ++pos;
       ++col;
       if (col >= width) {
@@ -1079,7 +1117,14 @@ static int DecodeAlphaData(VP8LDecoder* const dec, uint8_t* const data,
       dist_code = GetCopyDistance(dist_symbol, br);
       dist = PlaneCodeToDistance(width, dist_code);
       if (pos >= dist && end - pos >= length) {
-        CopyBlock8b(data + pos, dist, length);
+        if (dec->ring_px_ > 0) {  // VDAC4: по кольцу
+          if (!RingCopy8b(dec, data, pos, dist, length)) {
+            ok = 0;
+            goto End;
+          }
+        } else {
+          CopyBlock8b(data + pos, dist, length);
+        }
       } else {
         ok = 0;
         goto End;
@@ -1134,10 +1179,145 @@ static void RestoreState(VP8LDecoder* const dec) {
   }
 }
 
+// VDAC4: тот же разбор, что DecodeImageData, но точки — в кольце (dec->ring_px_): место —
+// номер точки по модулю кольца, ссылки назад — RingCopy32b. Только для разбора целиком (не
+// incremental: кольцо не держит точки для отката к сохранённому месту).
+static int DecodeImageDataRing(VP8LDecoder* const dec, uint32_t* const data,
+                               int width, int height, int last_row,
+                               ProcessRowsFunc process_func) {
+  const int ring = dec->ring_px_;
+  int pos = dec->last_pixel_;
+  int row = pos / width;
+  int col = pos % width;
+  int last_cached = pos;
+  VP8LBitReader* const br = &dec->br_;
+  VP8LMetadata* const hdr = &dec->hdr_;
+  const int end = width * height;      // End of data
+  const int last = width * last_row;   // Last pixel to decode
+  const int len_code_limit = NUM_LITERAL_CODES + NUM_LENGTH_CODES;
+  const int color_cache_limit = len_code_limit + hdr->color_cache_size_;
+  VP8LColorCache* const color_cache =
+      (hdr->color_cache_size_ > 0) ? &hdr->color_cache_ : NULL;
+  const int mask = hdr->huffman_mask_;
+  const HTreeGroup* htree_group =
+      (pos < last) ? GetHtreeGroupForPos(hdr, col, row) : NULL;
+  assert(dec->last_row_ < last_row);
+  assert(last <= end);
+  if (dec->incremental_) goto Error;
+
+  while (pos < last) {
+    int code;
+    uint32_t* const src = data + pos % ring;
+    if ((col & mask) == 0) {
+      htree_group = GetHtreeGroupForPos(hdr, col, row);
+    }
+    assert(htree_group != NULL);
+    if (htree_group->is_trivial_code) {
+      *src = htree_group->literal_arb;
+      goto AdvanceByOne;
+    }
+    VP8LFillBitWindow(br);
+    if (htree_group->use_packed_table) {
+      code = ReadPackedSymbols(htree_group, br, src);
+      if (VP8LIsEndOfStream(br)) break;
+      if (code == PACKED_NON_LITERAL_CODE) goto AdvanceByOne;
+    } else {
+      code = ReadSymbol(htree_group->htrees[GREEN], br);
+    }
+    if (VP8LIsEndOfStream(br)) break;
+    if (code < NUM_LITERAL_CODES) {  // Literal
+      if (htree_group->is_trivial_literal) {
+        *src = htree_group->literal_arb | (code << 8);
+      } else {
+        int red, blue, alpha;
+        red = ReadSymbol(htree_group->htrees[RED], br);
+        VP8LFillBitWindow(br);
+        blue = ReadSymbol(htree_group->htrees[BLUE], br);
+        alpha = ReadSymbol(htree_group->htrees[ALPHA], br);
+        if (VP8LIsEndOfStream(br)) break;
+        *src = ((uint32_t)alpha << 24) | (red << 16) | (code << 8) | blue;
+      }
+    AdvanceByOne:
+      ++pos;
+      ++col;
+      if (col >= width) {
+        col = 0;
+        ++row;
+        if (process_func != NULL) {
+          if (row <= last_row && (row % NUM_ARGB_CACHE_ROWS == 0)) {
+            process_func(dec, row);
+          }
+        }
+        if (color_cache != NULL) {
+          while (last_cached < pos) {
+            VP8LColorCacheInsert(color_cache, data[last_cached++ % ring]);
+          }
+        }
+      }
+    } else if (code < len_code_limit) {  // Backward reference
+      int dist_code, dist;
+      const int length_sym = code - NUM_LITERAL_CODES;
+      const int length = GetCopyLength(length_sym, br);
+      const int dist_symbol = ReadSymbol(htree_group->htrees[DIST], br);
+      VP8LFillBitWindow(br);
+      dist_code = GetCopyDistance(dist_symbol, br);
+      dist = PlaneCodeToDistance(width, dist_code);
+      if (VP8LIsEndOfStream(br)) break;
+      if (pos < dist || end - pos < length) goto Error;
+      if (!RingCopy32b(dec, data, pos, dist, length)) goto TooFar;
+      pos += length;
+      col += length;
+      while (col >= width) {
+        col -= width;
+        ++row;
+        if (process_func != NULL) {
+          if (row <= last_row && (row % NUM_ARGB_CACHE_ROWS == 0)) {
+            process_func(dec, row);
+          }
+        }
+      }
+      if (col & mask) htree_group = GetHtreeGroupForPos(hdr, col, row);
+      if (color_cache != NULL) {
+        while (last_cached < pos) {
+          VP8LColorCacheInsert(color_cache, data[last_cached++ % ring]);
+        }
+      }
+    } else if (code < color_cache_limit) {  // Color cache
+      const int key = code - len_code_limit;
+      assert(color_cache != NULL);
+      while (last_cached < pos) {
+        VP8LColorCacheInsert(color_cache, data[last_cached++ % ring]);
+      }
+      *src = VP8LColorCacheLookup(color_cache, key);
+      goto AdvanceByOne;
+    } else {  // Not reached
+      goto Error;
+    }
+  }
+
+  br->eos_ = VP8LIsEndOfStream(br);
+  if (br->eos_) goto Error;   // как у DecodeImageData без incremental: поток кончился раньше
+  if (process_func != NULL) {
+    process_func(dec, row > last_row ? last_row : row);
+  }
+  dec->status_ = VP8_STATUS_OK;
+  dec->last_pixel_ = pos;  // end-of-scan marker
+  return 1;
+
+ TooFar:  // ссылка назад дальше кольца строк
+  return VP8LSetError(dec, VP8_STATUS_UNSUPPORTED_FEATURE);
+ Error:
+  return VP8LSetError(dec, VP8_STATUS_BITSTREAM_ERROR);
+}
+
 #define SYNC_EVERY_N_ROWS 8  // minimum number of rows between check-points
 static int DecodeImageData(VP8LDecoder* const dec, uint32_t* const data,
                            int width, int height, int last_row,
                            ProcessRowsFunc process_func) {
+  if (dec->ring_px_ > 0 && data == dec->pixels_) {  // VDAC4: точки — в кольце
+    return DecodeImageDataRing(dec, data, width, height, last_row, process_func);
+  }
+  {
   int row = dec->last_pixel_ / width;
   int col = dec->last_pixel_ % width;
   VP8LBitReader* const br = &dec->br_;
@@ -1290,6 +1470,7 @@ static int DecodeImageData(VP8LDecoder* const dec, uint32_t* const data,
 
  Error:
   return VP8LSetError(dec, VP8_STATUS_BITSTREAM_ERROR);
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -1543,9 +1724,24 @@ static int DecodeImageStream(int xsize, int ysize,
 }
 
 //------------------------------------------------------------------------------
+// VDAC4: сколько строк держать в кольце точек VP8L (bpp — байт на точку): ~1 МБ, не меньше
+// четырёх пачек по NUM_ARGB_CACHE_ROWS, целыми пачками. 0 — вся картинка (она меньше кольца,
+// или разбор по частям — incremental).
+#define VDAC4_RING_BYTES (1024 * 1024)
+int VDAC4WebPRingOff;  // VDAC4: 1 — без кольца (повтор разбора после «ссылка дальше кольца»)
+static int RingRows(const VP8LDecoder* const dec, int bpp) {
+  int rows = (int)(VDAC4_RING_BYTES / ((uint64_t)dec->width_ * bpp));
+  if (dec->incremental_ || VDAC4WebPRingOff) return 0;
+  if (rows < 4 * NUM_ARGB_CACHE_ROWS) rows = 4 * NUM_ARGB_CACHE_ROWS;
+  rows = (rows + NUM_ARGB_CACHE_ROWS - 1) / NUM_ARGB_CACHE_ROWS * NUM_ARGB_CACHE_ROWS;
+  return rows >= dec->height_ ? 0 : rows;
+}
+
 // Allocate internal buffers dec->pixels_ and dec->argb_cache_.
 static int AllocateInternalBuffers32b(VP8LDecoder* const dec, int final_width) {
-  const uint64_t num_pixels = (uint64_t)dec->width_ * dec->height_;
+  const int ring_rows = RingRows(dec, (int)sizeof(uint32_t));  // VDAC4
+  const uint64_t num_pixels =
+      (uint64_t)dec->width_ * (ring_rows > 0 ? ring_rows : dec->height_);
   // Scratch buffer corresponding to top-prediction row for transforming the
   // first row in the row-blocks. Not needed for paletted alpha.
   const uint64_t cache_top_pixels = (uint16_t)final_width;
@@ -1561,16 +1757,20 @@ static int AllocateInternalBuffers32b(VP8LDecoder* const dec, int final_width) {
     return VP8LSetError(dec, VP8_STATUS_OUT_OF_MEMORY);
   }
   dec->argb_cache_ = dec->pixels_ + num_pixels + cache_top_pixels;
+  dec->ring_px_ = ring_rows > 0 ? dec->width_ * ring_rows : 0;  // VDAC4
   return 1;
 }
 
 static int AllocateInternalBuffers8b(VP8LDecoder* const dec) {
-  const uint64_t total_num_pixels = (uint64_t)dec->width_ * dec->height_;
+  const int ring_rows = RingRows(dec, 1);  // VDAC4
+  const uint64_t total_num_pixels =
+      (uint64_t)dec->width_ * (ring_rows > 0 ? ring_rows : dec->height_);
   dec->argb_cache_ = NULL;    // for soundness
   dec->pixels_ = (uint32_t*)WebPSafeMalloc(total_num_pixels, sizeof(uint8_t));
   if (dec->pixels_ == NULL) {
     return VP8LSetError(dec, VP8_STATUS_OUT_OF_MEMORY);
   }
+  dec->ring_px_ = ring_rows > 0 ? dec->width_ * ring_rows : 0;  // VDAC4
   return 1;
 }
 
@@ -1580,25 +1780,25 @@ static int AllocateInternalBuffers8b(VP8LDecoder* const dec) {
 static void ExtractAlphaRows(VP8LDecoder* const dec, int last_row) {
   int cur_row = dec->last_row_;
   int num_rows = last_row - cur_row;
-  const uint32_t* in = dec->pixels_ + dec->width_ * cur_row;
-
   assert(last_row <= dec->io_->crop_bottom);
   while (num_rows > 0) {
     const int num_rows_to_process =
         (num_rows > NUM_ARGB_CACHE_ROWS) ? NUM_ARGB_CACHE_ROWS : num_rows;
+    const uint32_t* const in =
+        dec->pixels_ + RingPos(dec, dec->width_ * cur_row);  // VDAC4: кольцо
     // Extract alpha (which is stored in the green plane).
     ALPHDecoder* const alph_dec = (ALPHDecoder*)dec->io_->opaque;
     uint8_t* const output = alph_dec->output_;
     const int width = dec->io_->width;      // the final width (!= dec->width_)
     const int cache_pixs = width * num_rows_to_process;
-    uint8_t* const dst = output + width * cur_row;
+    uint8_t* const dst =
+        output + width * (cur_row - alph_dec->output_row0_);  // VDAC4: окно
     const uint32_t* const src = dec->argb_cache_;
     ApplyInverseTransforms(dec, cur_row, num_rows_to_process, in);
     WebPExtractGreen(src, dst, cache_pixs);
     AlphaApplyFilter(alph_dec,
                      cur_row, cur_row + num_rows_to_process, dst, width);
     num_rows -= num_rows_to_process;
-    in += num_rows_to_process * dec->width_;
     cur_row += num_rows_to_process;
   }
   assert(cur_row == last_row);

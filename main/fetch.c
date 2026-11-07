@@ -21,6 +21,9 @@
 #include "download.h"
 #include "url.h"
 #include "ts.h"
+#ifdef TSAFARI_HOST
+#include <stdlib.h>                      /* стенд ПК: getenv (TSAFARI_SLOW) */
+#endif
 
 #define STEP (64u * 1024u)                 /* на столько растёт память под страницу */
 #define IDLE_MS 20000u                     /* без новых байтов дольше — обрыв */
@@ -43,6 +46,9 @@ static size_t cap;                       /* сколько памяти выде
  * сказал «attachment» — «сохранить как файл». */
 int fetch_is_file(const char *ct, const char *disp) {
     if (disp && disp[0] && !strncmp(disp, "attachment", 10)) return 1;
+    /* картинка по ссылке — показать, как у браузеров (app.c, image_page): 07.11 подпись галереи
+     * zx-evolution.com (ссылка на сам .webp) сохраняла файл на карту вместо показа */
+    if (!strncmp(ct, "image/", 6)) return 0;
     return ct[0] && strncmp(ct, "text/", 5) && !strstr(ct, "html") && !strstr(ct, "xml");
 }
 
@@ -103,10 +109,19 @@ static void run_one(void) {
     ts_core->mutex_unlock(mutex);
     if (!res.image && fetch_is_file(res.content_type, res.disposition)) { run_stream(st); return; }
     size_t limit = fetch_is_file(res.content_type, res.disposition) ? FETCH_FILE_LIMIT : FETCH_LIMIT;
+    /* Длина известна — память сразу на весь файл, одним куском. Рост по STEP (64 КБ) у большого
+     * файла на каждом шаге держит старый и новый буферы разом (WebP 1,2 МБ — до 2,4 МБ на миг) и
+     * дробит PSRAM: на плате 07.11 такая картинка срывалась («not loaded»). */
+    if (res.total && res.total <= limit && res.total > cap && !res.length) {
+        if (res.body) ts_core->free(res.body);                /* прежний буфер — не копировать */
+        res.body = ts_alloc(res.total);
+        cap = res.body ? res.total : 0;
+    }
     uint32_t last = ts_core->millis();
     for (;;) {
         if (cancel_flag || !__atomic_load_n(&ts_running, __ATOMIC_ACQUIRE)) break;
         if (res.length == cap) {
+            if (res.total && res.length >= res.total) break;  /* всё, что обещал сервер, пришло */
             if (cap >= limit) {
                 snprintf(res.error, sizeof(res.error), "%s", limit == FETCH_LIMIT ? "page is larger than 2 MB" : "file is larger than 4 MB");
                 break;
@@ -444,8 +459,21 @@ void fetch_post(const char *url, const char *body, size_t len) {
 
 void fetch_cancel(void) {
     ts_core->mutex_lock(mutex);
+    /* Задача загрузки адрес ещё не взяла (она ничего не грузит): итог «отменена» — сразу, иначе его
+     * не будет никогда, и браузер вечно ждёт (07.11: брошенная далёкая картинка — «браузер завис»).
+     * Грузит прежнюю — та кончится «отменой» (её отменил start_request) и даст итог сама. */
+    if (request && res.state != FETCH_BUSY) {
+        res.state = FETCH_CANCELLED;
+        reported = 0;
+    }
     request = 0;
     if (res.state == FETCH_BUSY) cancel_flag = 1;
+#ifdef TSAFARI_HOST
+    /* стенд «как на плате»: картинка ещё «идёт» (fetch_poll её придерживает) — отменить её, как
+     * отменилась бы на плате */
+    if (res.state == FETCH_DONE && res.image && getenv("TSAFARI_SLOW") &&
+        (ts_core->millis() - res.started) * 100u < 30000u + (uint32_t)res.length) res.state = FETCH_CANCELLED;
+#endif
     ts_core->mutex_unlock(mutex);
 }
 
@@ -455,6 +483,12 @@ int fetch_poll(fetch_result_t **r) {
     int st;
     ts_core->mutex_lock(mutex);
     st = request ? FETCH_BUSY : res.state;
+#ifdef TSAFARI_HOST
+    /* стенд «как на плате» (TSAFARI_SLOW=1): картинка идёт по сети 0,3 с + 100 КБ/с — на ПК файл
+     * приходит сразу, и то, что меняется за время загрузки (прокрутка), стенд иначе не видит */
+    if (st == FETCH_DONE && res.image && getenv("TSAFARI_SLOW") &&
+        (ts_core->millis() - res.started) * 100u < 30000u + (uint32_t)res.length) st = FETCH_BUSY;
+#endif
     if (!request && !reported && (st == FETCH_DONE || st == FETCH_FAILED || st == FETCH_CANCELLED)) {
         reported = 1;
         out = res;
@@ -483,13 +517,23 @@ int fetch_peek(fetch_result_t *r) {
 
 uint8_t *fetch_take_body(void) {
     uint8_t *b = NULL;
+    size_t n = 0, had = 0;
     ts_core->mutex_lock(mutex);
     if (!request && res.state != FETCH_BUSY) {
         b = res.body;
+        n = res.length;
+        had = cap;
         res.body = NULL;
         out.body = NULL;
         cap = 0;
     }
     ts_core->mutex_unlock(mutex);
+    /* Память росла кусками по STEP (64 КБ): значок SVG в 150 байт держал бы 64 КБ, а картинки и
+     * кэши считают память по длине файла — на странице с десятками картинок PSRAM кончалась
+     * (стенд 07.11: 80 значков — 6 МБ, картинки «not loaded»). Отдаём ровно по длине. */
+    if (b && n < had) {
+        uint8_t *q = ts_core->realloc(b, n ? n : 1);
+        if (q) b = q;
+    }
     return b;
 }

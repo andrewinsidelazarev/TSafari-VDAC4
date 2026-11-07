@@ -36,6 +36,7 @@ struct ALPHDecoder {
                        // pixel, sometimes VP8LDecoder may need to allocate
                        // 4 bytes per pixel internally during decode.
   uint8_t* output_;
+  int output_row0_;            // VDAC4: в output_ — строки начиная с этой (окно строк)
   const uint8_t* prev_line_;   // last output row (or NULL)
 };
 

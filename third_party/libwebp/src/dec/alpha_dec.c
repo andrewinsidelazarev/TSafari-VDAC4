@@ -12,6 +12,7 @@
 // Author: Skal (pascal.massimino@gmail.com)
 
 #include <stdlib.h>
+#include <string.h>
 #include "src/dec/alphai_dec.h"
 #include "src/dec/vp8_dec.h"
 #include "src/dec/vp8i_dec.h"
@@ -120,7 +121,7 @@ WEBP_NODISCARD static int ALPHDecode(VP8Decoder* const dec, int row,
     int y;
     const uint8_t* prev_line = dec->alpha_prev_line_;
     const uint8_t* deltas = dec->alpha_data_ + ALPHA_HEADER_LEN + row * width;
-    uint8_t* dst = dec->alpha_plane_ + row * width;
+    uint8_t* dst = dec->alpha_plane_ + (row - dec->alpha_row0_) * width;  // VDAC4: окно
     assert(deltas <= &dec->alpha_data_[dec->alpha_data_size_]);
     assert(WebPUnfilters[alph_dec->filter_] != NULL);
     for (y = 0; y < num_rows; ++y) {
@@ -143,10 +144,23 @@ WEBP_NODISCARD static int ALPHDecode(VP8Decoder* const dec, int row,
   return 1;
 }
 
+// VDAC4: прозрачность — окно строк, а не плоскость на всю картинку (у 2560×2560 — 6,5 МБ):
+// libwebp просит строки подряд, по строке макроблоков (до 16 + 8 строк фильтра). Из прошлых строк
+// нужны: предыдущая — для снятия фильтра; при уменьшении — столько, сколько строк источника идёт
+// на строку выхода: масштабирование прозрачности может отстать от цвета и дочитать их (io_dec.c,
+// EmitRescaledAlphaRGB — смещение от io->a бывает отрицательным). Вся плоскость — только для
+// сглаживания уровней (alpha_dithering_), которое смотрит на всю картинку сразу.
+#define VDAC4_ALPHA_ROWS 64
+
 WEBP_NODISCARD static int AllocateAlphaPlane(VP8Decoder* const dec,
                                              const VP8Io* const io) {
   const int stride = io->width;
-  const int height = io->crop_bottom;
+  const int src_h = io->crop_bottom - io->crop_top;
+  const int keep = (io->use_scaling && io->scaled_height > 0) ?
+      (src_h + io->scaled_height - 1) / io->scaled_height + 1 : 1;
+  const int height =
+      (dec->alpha_dithering_ > 0 || io->crop_bottom <= keep + VDAC4_ALPHA_ROWS) ?
+      io->crop_bottom : keep + VDAC4_ALPHA_ROWS;  // VDAC4
   const uint64_t alpha_size = (uint64_t)stride * height;
   assert(dec->alpha_plane_mem_ == NULL);
   dec->alpha_plane_mem_ =
@@ -157,6 +171,9 @@ WEBP_NODISCARD static int AllocateAlphaPlane(VP8Decoder* const dec,
   }
   dec->alpha_plane_ = dec->alpha_plane_mem_;
   dec->alpha_prev_line_ = NULL;
+  dec->alpha_row0_ = 0;          // VDAC4
+  dec->alpha_rows_ = height;
+  dec->alpha_keep_ = keep;
   return 1;
 }
 
@@ -205,13 +222,36 @@ WEBP_NODISCARD const uint8_t* VP8DecompressAlphaRows(VP8Decoder* const dec,
       // if we allowed use of alpha dithering, check whether it's needed at all
       if (dec->alph_dec_->pre_processing_ != ALPHA_PREPROCESSED_LEVELS) {
         dec->alpha_dithering_ = 0;   // disable dithering
-      } else {
+      } else if (dec->alpha_dithering_ > 0) {  // VDAC4: всё сразу — только для сглаживания
         num_rows = height - row;     // decode everything in one pass
       }
     }
 
     assert(dec->alph_dec_ != NULL);
     assert(row + num_rows <= height);
+    // VDAC4: окно строк сдвинуть так, чтобы в нём были строки row…row+num_rows−1 и alpha_keep_
+    // прошлых (снятие фильтра, отставание масштабирования): они переносятся в начало окна.
+    if (row + num_rows - dec->alpha_row0_ > dec->alpha_rows_) {
+      const int keep = (row > dec->alpha_keep_) ? row - dec->alpha_keep_ : 0;
+      if (row + num_rows - keep > dec->alpha_rows_ || keep < dec->alpha_row0_) {
+        VP8SetError(dec, VP8_STATUS_UNSUPPORTED_FEATURE, "Alpha window is too small.");
+        goto Error;
+      }
+      if (row > keep) {
+        memmove(dec->alpha_plane_,
+                dec->alpha_plane_ + (keep - dec->alpha_row0_) * width,
+                (size_t)(row - keep) * width);
+      }
+      dec->alpha_row0_ = keep;
+      dec->alph_dec_->output_row0_ = keep;
+      // предыдущая строка (row − 1) теперь — на месте row − 1 − keep от начала окна
+      if (dec->alpha_prev_line_ != NULL) {
+        dec->alpha_prev_line_ = dec->alpha_plane_ + (row - 1 - keep) * width;
+      }
+      if (dec->alph_dec_->prev_line_ != NULL) {
+        dec->alph_dec_->prev_line_ = dec->alpha_plane_ + (row - 1 - keep) * width;
+      }
+    }
     if (!ALPHDecode(dec, row, num_rows)) goto Error;
 
     if (dec->is_alpha_decoded_) {   // finished?
@@ -231,7 +271,7 @@ WEBP_NODISCARD const uint8_t* VP8DecompressAlphaRows(VP8Decoder* const dec,
   }
 
   // Return a pointer to the current decoded row.
-  return dec->alpha_plane_ + row * width;
+  return dec->alpha_plane_ + (row - dec->alpha_row0_) * width;  // VDAC4: окно
 
  Error:
   WebPDeallocateAlphaMemory(dec);

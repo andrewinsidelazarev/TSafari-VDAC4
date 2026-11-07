@@ -13,7 +13,10 @@
 #include <string.h>
 #include "zm_app.h"
 #include "download.h"
+#include "imgcache.h"
 #include "ft_copro.h"
+#include <io.h>                          /* _findfirst — список файлов «карты» кэша картинок */
+#include <time.h>
 
 int tsafari_host_init(const zm_core_t *c);
 int tsafari_host_step(uint32_t now);
@@ -30,10 +33,47 @@ static uint32_t dl_words, frames, now_ms;
 static int wifi_up;
 static const char *out_dir;
 
-/* --- поддельное ядро --- */
-static void *c_alloc(size_t n, uint32_t caps) { (void)caps; return calloc(1, n ? n : 1); }
-static void *c_realloc(void *p, size_t n) { return realloc(p, n); }
-static void c_free(void *p) { free(p); }
+/* --- поддельное ядро ---
+ * Память — с пределом, как PSRAM платы: приложению на ESP32-S3 после старта свободно ~5,8 МБ
+ * (журнал 04.11), всего у него — ~6 МБ вместе с тем, что взято при старте. Без предела стенд
+ * разбирал WebP 2560×2560, которому libwebp просит 39 МБ, а на плате он «Image unavailable». */
+#define PSRAM_APP (6u * 1024u * 1024u)
+uint32_t image_host_kept(void);                  /* image.c: точки и файлы картинок в PSRAM */
+typedef struct { size_t n; size_t pad; } mem_t;
+static size_t mem_used;
+static void *c_alloc(size_t n, uint32_t caps) {
+    (void)caps;
+    if (!n) n = 1;
+    if (mem_used + n > PSRAM_APP) {
+        if (getenv("TSAFARI_MEMLOG")) {                  /* кто держит память, когда её не хватило */
+            printf("    MEM no %u KB: used %u KB, image caches %u KB, card queue %u KB\n", (unsigned)(n / 1024u),
+                   (unsigned)(mem_used / 1024u), image_host_kept() / 1024u, imgcache_host_queued() / 1024u);
+        }
+        return NULL;
+    }
+    mem_t *m = calloc(1, sizeof(mem_t) + n);
+    if (!m) return NULL;
+    m->n = n;
+    mem_used += n;
+    return m + 1;
+}
+static void c_free(void *p) {
+    if (!p) return;
+    mem_t *m = (mem_t *)p - 1;
+    mem_used -= m->n;
+    free(m);
+}
+static void *c_realloc(void *p, size_t n) {
+    if (!p) return c_alloc(n, 0);
+    mem_t *m = (mem_t *)p - 1;
+    if (!n) n = 1;
+    if (mem_used - m->n + n > PSRAM_APP) return NULL;
+    mem_t *q = realloc(m, sizeof(mem_t) + n);
+    if (!q) return NULL;
+    mem_used = mem_used - q->n + n;
+    q->n = n;
+    return q + 1;
+}
 static void c_log(const char *f, ...) { va_list a; va_start(a, f); printf("  log: "); vprintf(f, a); printf("\n"); va_end(a); }
 static uint32_t c_millis(void) { return now_ms; }
 static void c_delay(uint32_t ms) { now_ms += ms; }
@@ -41,9 +81,9 @@ static void *c_mutex(void) { static int m; return &m; }
 static void c_lock(void *m) { (void)m; }
 /* Ответ на команду программы Z80 — запомнить: его читает поддельная программа Z80 загрузок.
  * Кадр к Z80 — не больше 256 байт (больше на плате теряется), событие — не больше 63. */
-static uint8_t reply_buf[256], reply_code, ev_buf[64];
+static uint8_t reply_buf[256], reply_code, ev_buf[64], ev8_buf[64];
 static uint16_t reply_len;
-static int ev_pending;
+static int ev_pending, ev8_pending;
 static int c_reply(uint8_t r, const void *d, uint16_t n) {
     if (n > 256) { printf("reply %02X: %u bytes > 256\n", r, n); exit(3); }
     reply_code = r; reply_len = n; memcpy(reply_buf, d, n);
@@ -53,6 +93,7 @@ static int c_event(uint8_t code, const void *d, uint16_t n, uint32_t w) {
     (void)w;
     if (n > 63) { printf("event %02X: %u bytes > 63\n", code, n); exit(3); }
     if (code == 0xE7) { memcpy(ev_buf, d, n); ev_pending = 1; }
+    if (code == 0xE8) { memcpy(ev8_buf, d, n); ev8_pending = 1; }   /* кэш картинок (imgcache.c) */
     return ZM_OK;
 }
 /* --- сопроцессор FT812: тот же код, что в прошивке BL616 (tests/copro, README там) ---
@@ -103,6 +144,18 @@ static int c_ft_read(uint32_t a, uint32_t *v) {
     *v = a == REG_FRAMES ? frames : a == REG_DLSWAP ? 0 : peek32(a);
     return ZM_OK;
 }
+/* LINK ядра FT812 (TSAFARI_RAMG3=1): FT_CFG/FT_STAT 0x5C — бит 0 записи → бит 27 чтения (RAM_G
+ * 3 МБ, ft.c ft_ramg_3mb). Без ключа LINK нет — браузер остаётся в 2 МБ, снимки (ramg.bin — 2 МБ)
+ * рисуются как прежде. */
+static uint32_t ft_stat = 1u << 12;              /* хост FT812 — ESP */
+static int c_link_read(uint32_t a, uint32_t *w, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++) w[i] = a + 4 * i == 0x5C ? ft_stat : 0;
+    return ZM_OK;
+}
+static int c_link_write(uint32_t a, const uint32_t *w, uint32_t n) {
+    if (a == 0x5C && n) ft_stat = (ft_stat & ~(1u << 27)) | (w[0] & 1u) << 27;
+    return ZM_OK;
+}
 static int c_wifi(char ssid[33], char ip[16], char mac[18]) {
     if (!wifi_up) return ZM_ERROR;
     strcpy(ssid, "ZX-Home"); strcpy(ip, "192.168.1.110"); strcpy(mac, "00:11:22:33:44:55");
@@ -115,6 +168,7 @@ typedef struct { uint8_t *data; size_t len, at; char ctype[64], clen[16], final[
 static const char *pages_dir = "tests/pages";
 static char last_get[600], last_post[2000];   /* что дошло до «сервера» последним */
 static int moved_old, moved_new;              /* картинка страницы переадресации: просили с old/ и с new/ */
+static int net_images;                        /* сколько раз картинку брали из сети (не .html) */
 static void *c_net_open(const char *url, const char *extra, uint32_t t, int *status) {
     (void)extra; (void)t;
     const char *host = "https://test.local/";
@@ -137,6 +191,7 @@ static void *c_net_open(const char *url, const char *extra, uint32_t t, int *sta
      * спрошенная по набранному адресу, — 404. */
     char final[600];
     snprintf(final, sizeof(final), "%s", url);
+    if (!strstr(url, ".htm")) net_images++;
     if (!strncmp(url + strlen(host), "old/", 4)) {
         if (strstr(url, ".png")) moved_old++;
         if (!strstr(url, ".html")) { *status = 404; return NULL; }
@@ -155,7 +210,10 @@ static void *c_net_open(const char *url, const char *extra, uint32_t t, int *sta
     fclose(f);
     strcpy(s->ctype, strstr(path, ".koi8") ? "text/html; charset=koi8-r" : strstr(path, ".txt") ? "text/plain" :
                      strstr(path, ".ZIP") || strstr(path, ".zip") ? "application/zip" :
-                     strstr(path, ".nolen") ? "application/octet-stream" : "text/html");
+                     strstr(path, ".nolen") ? "application/octet-stream" :
+                     strstr(path, ".webp") ? "image/webp" : strstr(path, ".png") ? "image/png" :
+                     strstr(path, ".jpg") || strstr(path, ".jpeg") ? "image/jpeg" : strstr(path, ".gif") ? "image/gif" :
+                     strstr(path, ".svg") ? "image/svg+xml" : "text/html");
     /* «.nolen» — сервер не говорит длину (тогда загрузка кончается ответом «конец файла») */
     if (!strstr(path, ".nolen")) snprintf(s->clen, sizeof(s->clen), "%u", (unsigned)s->len);
     snprintf(s->final, sizeof(s->final), "%s", final);
@@ -333,6 +391,131 @@ static void z80_download(void) {
     zdl.on = 0; dl_saved++;
 }
 
+/* --- поддельная программа Z80 кэша картинок (как launcher/imgcache.asm): событие E8 → список,
+ * чтение, запись или удаление файла в папке card_dir (по умолчанию <out>/../card/Cache/Images).
+ * За шаг 10 мс — 4 куска чтения по 1016 байт или 8 кусков записи по 246 (~400 и ~200 КБ/с). --- */
+static struct { int on, op; uint16_t seq; uint32_t size, at; char name[24]; uint8_t *buf; } zc;
+static char card_dir[600];
+static uint16_t rd16h(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
+static void zc_report(int result, int code) {
+    uint8_t q[14] = {(uint8_t)zc.seq, (uint8_t)(zc.seq >> 8), (uint8_t)result, (uint8_t)code};
+    memcpy(q + 4, "2026-11-07", 10);
+    tsafari_host_command(0x77, q, 14);
+    if (result != 3) zc.on = 0;
+}
+static void zc_list(void) {
+    char pat[640];
+    snprintf(pat, sizeof(pat), "%s/*", card_dir);
+    uint8_t f[1024];
+    unsigned fill = 2;
+    f[0] = (uint8_t)zc.seq; f[1] = (uint8_t)(zc.seq >> 8);
+    struct _finddata_t fd;
+    intptr_t h = _findfirst(pat, &fd);
+    for (int more = h != -1; more; more = _findnext(h, &fd) == 0) {
+        if (fd.attrib & _A_SUBDIR) continue;
+        size_t k = strlen(fd.name);
+        if (k > 47) continue;
+        if (fill + 9 + k + 1 > 1000) {                /* кадр полон — отправить */
+            tsafari_host_command(0x78, f, (uint16_t)fill);
+            if (reply_code != 0xF8 || reply_buf[2] != 1) { _findclose(h); zc_report(2, 0); return; }
+            fill = 2;
+        }
+        struct tm *t = localtime(&fd.time_write);
+        uint16_t date = (uint16_t)((t->tm_year - 80) << 9 | (t->tm_mon + 1) << 5 | t->tm_mday);
+        uint16_t time = (uint16_t)(t->tm_hour << 11 | t->tm_min << 5 | t->tm_sec / 2);
+        uint32_t size = (uint32_t)fd.size;
+        f[fill] = (uint8_t)size; f[fill + 1] = (uint8_t)(size >> 8); f[fill + 2] = (uint8_t)(size >> 16); f[fill + 3] = (uint8_t)(size >> 24);
+        f[fill + 4] = (uint8_t)date; f[fill + 5] = (uint8_t)(date >> 8);
+        f[fill + 6] = (uint8_t)time; f[fill + 7] = (uint8_t)(time >> 8);
+        f[fill + 8] = 0;
+        memcpy(f + fill + 9, fd.name, k + 1);
+        fill += (unsigned)(9 + k + 1);
+    }
+    if (h != -1) _findclose(h);
+    if (fill > 2) {
+        tsafari_host_command(0x78, f, (uint16_t)fill);
+        if (reply_code != 0xF8 || reply_buf[2] != 1) { zc_report(2, 0); return; }
+    }
+    zc_report(0, 0);
+}
+static void z80_cache(void) {
+    char path[700];
+    if (ev8_pending) {
+        ev8_pending = 0;
+        zc.on = 1; zc.op = ev8_buf[0]; zc.seq = rd16h(ev8_buf + 1); zc.size = rd32(ev8_buf + 3); zc.at = 0;
+        snprintf(zc.name, sizeof(zc.name), "%s", (const char *)ev8_buf + 7);
+        snprintf(path, sizeof(path), "%s/%s", card_dir, zc.name);
+        zc_report(3, 0);                              /* «принято, начинаю» */
+        if (zc.op == 1) {
+            char cmd[700];
+            snprintf(cmd, sizeof(cmd), "mkdir \"%s\" 2>nul", card_dir);
+            for (char *c = cmd; *c; c++) if (*c == '/') *c = '\\';
+            system(cmd);
+            zc_list();
+        } else if (zc.op == 2) {
+            FILE *fi = fopen(path, "rb");
+            if (!fi) { zc_report(1, 0xF1); return; }
+            fseek(fi, 0, SEEK_END); zc.size = (uint32_t)ftell(fi); fseek(fi, 0, SEEK_SET);
+            zc.buf = realloc(zc.buf, zc.size + 1);
+            zc.size = (uint32_t)fread(zc.buf, 1, zc.size, fi);
+            fclose(fi);
+        } else if (zc.op == 3) {
+            zc.buf = realloc(zc.buf, zc.size + 1);
+        } else if (zc.op == 4) {
+            zc_report(remove(path) ? 1 : 0, 0xF1);
+        } else {
+            zc.on = 0;
+        }
+        return;                                       /* куски — со следующего шага */
+    }
+    if (!zc.on) return;
+    /* TSAFARI_SLOW: карта — как через Z80 на плате (оценка): чтение — кадр 1016 байт за шаг 10 мс
+     * (~100 КБ/с), запись — кусок 246 байт за шаг (~24 КБ/с) */
+    int slow = getenv("TSAFARI_SLOW") != NULL;
+    if (zc.op == 2) {
+        uint8_t f[6 + 1016];
+        for (int k = 0; k < (slow ? 1 : 4) && zc.at < zc.size; k++) {
+            uint32_t n = zc.size - zc.at > 1016 ? 1016 : zc.size - zc.at;
+            f[0] = (uint8_t)zc.seq; f[1] = (uint8_t)(zc.seq >> 8);
+            f[2] = (uint8_t)zc.at; f[3] = (uint8_t)(zc.at >> 8); f[4] = (uint8_t)(zc.at >> 16); f[5] = (uint8_t)(zc.at >> 24);
+            memcpy(f + 6, zc.buf + zc.at, n);
+            tsafari_host_command(0x79, f, (uint16_t)(6 + n));
+            if (reply_code != 0xF9 || reply_buf[2] != 1) { zc_report(2, 0); return; }
+            zc.at += n;
+        }
+        if (zc.at >= zc.size) zc_report(0, 0);
+    } else if (zc.op == 3) {
+        uint8_t q[6] = {(uint8_t)zc.seq, (uint8_t)(zc.seq >> 8)};
+        for (int k = 0; k < (slow ? 1 : 8) && zc.at < zc.size; k++) {
+            q[2] = (uint8_t)zc.at; q[3] = (uint8_t)(zc.at >> 8); q[4] = (uint8_t)(zc.at >> 16); q[5] = (uint8_t)(zc.at >> 24);
+            tsafari_host_command(0x76, q, 6);
+            unsigned count = reply_len >= 9 ? (unsigned)(reply_buf[7] | reply_buf[8] << 8) : 0;
+            if (reply_code != 0xF6 || reply_buf[2] != 1 || rd32(reply_buf + 3) != zc.at || reply_len != 9 + count || !count) {
+                zc_report(2, 0);
+                return;
+            }
+            memcpy(zc.buf + zc.at, reply_buf + 9, count);
+            zc.at += count;
+        }
+        if (zc.at < zc.size) return;
+        snprintf(path, sizeof(path), "%s/%s", card_dir, zc.name);
+        FILE *o = fopen(path, "wb");
+        if (!o) { zc_report(1, 0xFF); return; }
+        fwrite(zc.buf, 1, zc.size, o);
+        fclose(o);
+        zc_report(0, 0);
+    }
+}
+
+/* Сводка кэша картинок — строкой в вывод стенда. */
+static void cache_stats_line(const char *name) {
+    unsigned files, r, w;
+    uint32_t bytes;
+    imgcache_host_stats(&files, &bytes, &r, &w);
+    printf("%s: image cache %u files, %u KB, read from card %u, written %u, images from network %d\n", name, files,
+           (unsigned)(bytes / 1024u), r, w, net_images);
+}
+
 /* Поток по кругу (download.c): кольцо 1000 байт, файл 5000 байт; сеть дописывает, сколько
  * влезает, «программа Z80» забирает куски командами 76 — файл байт в байт, ответ «позже»,
  * когда сеть не успела. На стенде задача загрузки не ждёт Z80 (один поток), поэтому в
@@ -379,8 +562,12 @@ static int run(unsigned ms) {
     for (unsigned t = 0; t < ms; t += 10) {
         now_ms += 10;
         send_packet();
-        if (tsafari_host_step(now_ms) < 0) return 0;
+        if (tsafari_host_step(now_ms) < 0) {                  /* 3 — вышел по F12, так и надо */
+            if (tsafari_host_state() != 3) printf("step failed at %u ms, state %d\n", (unsigned)now_ms, tsafari_host_state());
+            return 0;
+        }
         z80_download();
+        z80_cache();
     }
     return 1;
 }
@@ -388,6 +575,19 @@ static int run(unsigned ms) {
 /* Щелчок по элементу формы номер id: где он — спросить form.c; не виден — листать PgDn/PgUp. */
 int form_host_rect(int id, int *x, int *y, int *w, int *h);
 int page_top(void);
+void image_host_stats(int top, int *seen, int *ready, int *failed, uint32_t *used);
+
+/* Сводка картинок видимой части — строкой в вывод стенда. */
+static void image_stats_line(const char *name) {
+    int seen, ready, failed;
+    uint32_t used;
+    image_host_stats(page_top(), &seen, &ready, &failed, &used);
+    printf("%s: top %d, images seen %d, ready %d, unavailable %d, RAM_G pool %u KB\n", name, page_top(),
+           seen, ready, failed, (unsigned)(used / 1024u));
+    if (getenv("TSAFARI_MEMLOG"))
+        printf("    MEM %s: used %u KB, image caches %u KB, card queue %u KB\n", name, (unsigned)(mem_used / 1024u),
+               image_host_kept() / 1024u, imgcache_host_queued() / 1024u);
+}
 static int click_control(int id) {
     int x, y, w, h, ok = 1;
     if (!form_host_rect(id, &x, &y, &w, &h)) { printf("control %d is not on the page\n", id); return 0; }
@@ -413,7 +613,8 @@ static void snapshot(const char *name) {
     FILE *o = fopen(f, "wb"); fwrite(ft, 1, 0x200000, o); fclose(o);
     snprintf(f, sizeof(f), "%s/dl.bin", path);
     o = fopen(f, "wb"); fwrite(ft + RAM_DL, 4, dl_words, o); fclose(o);
-    printf("snapshot %s: DL %u words, frames %u, cursor (%d,%d)\n", name, dl_words, frames, mouse_x, mouse_y);
+    printf("snapshot %s: DL %u words, frames %u, cursor (%d,%d), %u ms\n", name, dl_words, frames, mouse_x, mouse_y,
+           (unsigned)now_ms);
 }
 
 int main(int argc, char **argv) {
@@ -428,6 +629,7 @@ int main(int argc, char **argv) {
     core.mutex_create = c_mutex; core.mutex_lock = c_lock; core.mutex_unlock = c_lock;
     core.reply = c_reply; core.event = c_event;
     core.ft_open = c_ft_open; core.ft_write = c_ft_write; core.ft_read = c_ft_read;
+    if (getenv("TSAFARI_RAMG3")) { core.link_read = c_link_read; core.link_write = c_link_write; }
     core.wifi_info = c_wifi;
     core.net_open = c_net_open; core.net_header = c_net_header; core.net_read = c_net_read; core.net_close = c_net_close;
     core.sock_open = c_sock_open; core.sock_send = c_sock_send; core.sock_recv = c_sock_recv; core.sock_close = c_sock_close;
@@ -452,12 +654,20 @@ int main(int argc, char **argv) {
     printf("download names ok\n");
     now_ms = 1000;
     download_stream_ring(16u << 20);
+    /* «карта» кэша картинок: TSAFARI_CARD или рядом со снимками; TSAFARI_CACHE_MAX — предел */
+    if (getenv("TSAFARI_CARD")) snprintf(card_dir, sizeof(card_dir), "%s", getenv("TSAFARI_CARD"));
+    else snprintf(card_dir, sizeof(card_dir), "%s/../card/Cache/Images", out_dir);
+    if (getenv("TSAFARI_CACHE_MAX")) imgcache_host_limit((uint32_t)atol(getenv("TSAFARI_CACHE_MAX")));
     if (!tsafari_host_init(&core)) { printf("init failed, state %d\n", tsafari_host_state()); return 1; }
     if (!stream_ring_test()) { printf("stream ring test failed\n"); return 5; }
     int ok = 1;
     /* Одна страница из другой папки (настоящий сайт, сохранённый на диск): TSAFARI_PAGES — папка,
-     * TSAFARI_URL — что набрать в строке адреса (test.local/имя), снимки — экран за экраном. */
+     * TSAFARI_URL — что набрать в строке адреса (test.local/имя), снимки — экран за экраном.
+     * TSAFARI_SCREENS — сколько экранов листать (6); больше 6 — снимки только первых шести, потом
+     * Home и снимок «top_again» (картинки, убранные из RAM_G, должны вернуться). На каждом экране —
+     * сводка: сколько мест картинок видно, сколько готово и недоступно, сколько пула занято. */
     if (getenv("TSAFARI_PAGES") && getenv("TSAFARI_URL")) {
+        int screens = getenv("TSAFARI_SCREENS") ? atoi(getenv("TSAFARI_SCREENS")) : 6;
         pages_dir = getenv("TSAFARI_PAGES");
         wifi_up = 1;
         ok &= run(400);
@@ -468,15 +678,65 @@ int main(int argc, char **argv) {
         ok &= run(3000);
         goal_x = 900; goal_y = 700;
         ok &= run(500);  snapshot("p1");
-        for (int k = 2; k <= 6; k++) {
+        image_stats_line("p1");
+        for (int k = 2; k <= screens; k++) {
             char name[8];
             key_press(0x7A, 1);                           /* PgDn */
             ok &= run(1200);
             snprintf(name, sizeof(name), "p%d", k);
-            snapshot(name);
+            if (k <= 6) snapshot(name);
+            image_stats_line(name);
+        }
+        /* TSAFARI_IDLE — столько мс ничего не трогать: картинки должны успокоиться (на плате 07.11
+         * они грузились по кругу — «показал картинку, потом опять загружает»); журнал TSAFARI_IMGLOG
+         * между «idle begin» и «idle end» должен быть пуст (после первых секунд догрузки) */
+        if (getenv("TSAFARI_IDLE")) {
+            puts("idle begin");
+            ok &= run((unsigned)atoi(getenv("TSAFARI_IDLE")));
+            puts("idle end");
+            image_stats_line("idle");
+        }
+        /* TSAFARI_UPDOWN=n — n раз пролистать страницу вверх до начала и обратно вниз (на плате
+         * 07.11: «картинки перезагружаются при скролле верх-вниз»); журнал TSAFARI_IMGLOG между
+         * «updown begin» и «updown end» показывает, какие картинки раскладывались заново */
+        if (getenv("TSAFARI_UPDOWN")) {
+            int cycles = atoi(getenv("TSAFARI_UPDOWN"));
+            puts("updown begin");
+            for (int c = 0; c < cycles; c++) {
+                for (int k = 1; k < screens; k++) {
+                    char name[24];
+                    key_press(0x7D, 1);                   /* PgUp */
+                    ok &= run(1200);
+                    snprintf(name, sizeof(name), "up%d_%d", c, k);
+                    image_stats_line(name);
+                }
+                for (int k = 1; k < screens; k++) {
+                    char name[24];
+                    key_press(0x7A, 1);                   /* PgDn */
+                    ok &= run(1200);
+                    snprintf(name, sizeof(name), "down%d_%d", c, k);
+                    image_stats_line(name);
+                }
+            }
+            puts("updown end");
+        }
+        if (screens > 6) {
+            key_press(0x6C, 1);                           /* Home — в начало */
+            ok &= run(3000);
+            snapshot("top_again");
+            image_stats_line("top_again");
+            for (int k = 2; k <= 3; k++) {                /* схема платы и т. п. — снова в RAM_G */
+                char name[16];
+                key_press(0x7A, 1);
+                ok &= run(3000);
+                snprintf(name, sizeof(name), "p%d_again", k);
+                snapshot(name);
+                image_stats_line(name);
+            }
         }
         key_press(0x07, 0);
         run(50);
+        cache_stats_line("cache");
         printf("single page: %s\n", ok ? "ok" : "failed");
         return ok ? 0 : 2;
     }
@@ -636,5 +896,5 @@ int main(int argc, char **argv) {
         if (!same || dl_saved != 2) ok = 0;
     }
     printf("state %d (3 = exit by F12), %s\n", tsafari_host_state(), ok ? "steps ok" : "step failed");
-    return tsafari_host_state() == 3 ? 0 : 2;
+    return tsafari_host_state() == 3 && ok ? 0 : 2;  /* шаг не прошёл — и run_host.sh не пройдёт */
 }

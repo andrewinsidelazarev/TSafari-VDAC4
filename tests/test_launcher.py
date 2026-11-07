@@ -13,6 +13,7 @@ from harness import Disk, symbols  # noqa: E402
 BOARD = Path(os.environ.get("VDAC4_ROOT", r"E:\zx\Tang Nano 20k VDAC\VDAC4"))
 sys.path.insert(0, str(BOARD / "ESP32 S3 Zero N8R8/Network/tests"))
 from test_spi_link_z80 import SpiLinkMixin, frame as wire_frame  # noqa: E402
+from spi_link_model import LinkCore  # noqa: E402
 import z80  # noqa: E402
 
 ELF = bytes((i * 79 + 11) & 255 for i in range(5321))
@@ -156,6 +157,77 @@ class DownloadEsp(Esp):
         return super().__call__(c, p)
 
 
+class CacheEsp(Esp):
+    """Кэш картинок (launcher/imgcache.asm): события E8 [операция, номер, размер, имя] по одному —
+    следующее после доклада 77 о прошлом; кадры списка 78 и куски файла 79 собираются; куски
+    записи — ответами F6 на 76. stop_read_at — с этого числа принятых байт чтения (у записи — с
+    этого смещения куска) ответ «хватит». Когда операции кончились, браузер выходит (состояние 3)."""
+    def __init__(self, ops, stop_read_at=None):
+        super().__init__(exit_after=10 ** 9)
+        self.ops = list(ops); self.seq = 0x8000; self.cur = None; self.results = []
+        self.entries = []; self.data = bytearray(); self.acks = 0; self.done_at = None
+        self.stop_read_at = stop_read_at; self.frames = 0; self.big_frames = 0
+
+    def __call__(self, c, p):
+        p = bytes(p)
+        if c == 0x73:
+            self.status += 1
+            state = 3 if self.done_at is not None and self.status > self.done_at + 1 else 2
+            out = frame(0xF3, bytes([state, 1]) + bytes(4))
+            if self.cur is None and self.ops:
+                op, name, payload, *stop = self.ops.pop(0)
+                self.stop_read_at = stop[0] if stop else None
+                self.seq += 1
+                self.cur = (op, name, payload); self.entries = []; self.data = bytearray()
+                out += frame(0xE8, struct.pack("<BHI", op, self.seq, len(payload or b"")) + name + b"\0")
+            elif self.cur is None and self.done_at is None:
+                self.done_at = self.status
+            return out
+        if c == 0x77:
+            assert struct.unpack("<H", p[:2])[0] == self.seq
+            if p[2] == 3:
+                self.acks += 1
+                return frame(0xF7, b"\1")
+            op, name, payload = self.cur
+            self.results.append((op, name, p[2], p[3], list(self.entries) if op == 1 else bytes(self.data)))
+            self.cur = None
+            return frame(0xF7, b"\1")
+        if c == 0x76:
+            seq, at = struct.unpack("<HI", p)
+            assert seq == self.seq and self.cur[0] == 3
+            if self.stop_read_at is not None and at >= self.stop_read_at:   # «хватит»: чтение важнее
+                return frame(0xF6, struct.pack("<HB", seq, 0) + bytes(6))
+            payload = self.cur[2]
+            count = min(246, len(payload) - at)
+            return frame(0xF6, struct.pack("<HBIH", seq, 1, at, count) + payload[at:at + count])
+        if c == 0x78:
+            assert len(p) <= 1002, len(p)
+            seq = struct.unpack("<H", p[:2])[0]
+            q = p[2:]
+            while q:
+                size, date, time, flag = struct.unpack("<IHHB", q[:9])
+                end = q.index(0, 9)
+                self.entries.append((q[9:end].decode("cp866"), size, date, time, flag))
+                q = q[end + 1:]
+            return frame(0xF8, struct.pack("<HB", seq, 1))
+        if c == 0x79:
+            seq, at = struct.unpack("<HI", p[:6])
+            assert seq == self.seq and at == len(self.data) and len(p) <= 6 + 8192, (at, len(self.data), len(p))
+            self.data += p[6:]
+            self.frames += 1
+            self.big_frames += len(p) > 6 + 1016          # порция DMA (прошивка 0.1.121+)
+            stop = self.stop_read_at is not None and len(self.data) >= self.stop_read_at
+            return frame(0xF9, struct.pack("<HB", seq, 0 if stop else 1))
+        return super().__call__(c, p)
+
+
+def cache_files(disk):
+    """Файлы Cache\\Images в папке программы (/PROGRAMS/WEB, кластер 7): {имя: содержимое}."""
+    cache = disk.get("Cache", 7)["cluster"]
+    images = disk.get("Images", cache)["cluster"]
+    return {e["name"]: disk.contents(e["name"], images) for e in disk.entries(images) if not e["attr"] & 0x10}
+
+
 def saved(disk, date, name):
     """Файлы каталога \\zifi\\downloads\\<date> на модели карты: {имя: содержимое}."""
     zifi = disk.get("zifi")["cluster"]
@@ -218,7 +290,10 @@ class Machine(SpiLinkMixin):
         self.machine.set_output_callback(self.port_out)
         self.rx = bytearray(); self.tx = bytearray(); self.rx_polls = 0; self.esp = None
         self.vconfig = []; self.border = []; self.writes = 0; self.boot_trace = []
-        self.attach_link(); self.app = app; app.machine = self
+        # очередь «от Z80» — как в прошивке (kInputRingBytes 16 КБ): в 4 КБ модели порция DMA 8 КБ не влезет
+        self.attach_link(LinkCore(from_capacity=16384)); self.app = app; app.machine = self
+        # TSAFARI.ELF при запуске разрешает порции DMA команде 79 (link_media, прошивка 0.1.121)
+        self.link.core.app_media = (0x79, 0x79) if getattr(app, "media", True) else (1, 0)
         self.spi_select = 3; self.ft = Ft812(self, ft)
         self.page3 = 0x20; self.pages = {0x20: bytes(16384)}
         image = (ROOT / "build/launcher_screen.bin").read_bytes()
@@ -241,6 +316,11 @@ class Machine(SpiLinkMixin):
                 self.pages[self.page3] = bytes(self.memory[0xC000:0x10000])
                 self.page3 = value
                 self.machine.set_memory_block(0xC000, self.pages.get(value, bytes(16384)))
+                self.ports.write(port, value)               # окно #C000 — и модели DMA
+            elif (port & 255) == 0xAF and port >> 8 in (0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x26, 0x28):
+                super().port_out(port, value)               # регистры DMA TS-Config — и модели канала
+            elif port == 0x27AF and value & 7 == 2:
+                super().port_out(port, value)               # запуск DMA с SPI — модели канала (прочие — мимо)
             elif port == 0x00AF: self.vconfig.append(value)
             elif port & 255 == 0xFE: self.border.append(value & 7)
             elif port == 0xEFF7: self.gluk_open = value
@@ -419,6 +499,73 @@ class LauncherTest(unittest.TestCase):
         Machine(disk, esp).run()
         self.assertEqual(esp.result, (7, 0, 0, b"2026-01-01"))
         self.assertEqual(saved(disk, "2026-01-01", "ALTEREGO.ZIP"), {"ALTEREGO.ZIP": b"x" * 300})
+
+    def test_image_cache_list_write_read_delete(self):
+        """Кэш картинок (imgcache.asm): список создаёт Cache\\Images в папке программы; запись —
+        файлы байт в байт без «.$$$»; список — имена и размеры; чтение — кадрами 79 байт в байт;
+        удаление; чтение удалённого — ошибка карты (итог 1)."""
+        a = bytes((i * 37 + 5) & 255 for i in range(5000))
+        b = b"tiny" * 75
+        ops = [(1, b"", None), (3, b"0K3F9QAB.IMG", a), (3, b"1ABCDEFG.IMG", b), (1, b"", None),
+               (2, b"0K3F9QAB.IMG", None), (4, b"0K3F9QAB.IMG", None), (1, b"", None),
+               (2, b"0K3F9QAB.IMG", None)]
+        esp = CacheEsp(ops)
+        disk = disk_image()
+        Machine(disk, esp).run()
+        r = esp.results
+        self.assertEqual([x[2] for x in r], [0, 0, 0, 0, 0, 0, 0, 1], r)
+        self.assertEqual(esp.acks, 8, "каждое событие подтверждено")
+        self.assertEqual({n: s for n, s, *_ in r[3][4] if n.endswith(".IMG")},
+                         {"0K3F9QAB.IMG": 5000, "1ABCDEFG.IMG": 300})
+        self.assertEqual(r[4][4], a)
+        self.assertEqual({n for n, *_ in r[6][4] if n.endswith(".IMG")}, {"1ABCDEFG.IMG"})
+        self.assertEqual(cache_files(disk), {"1ABCDEFG.IMG": b})
+        disk.assert_mirrors()
+
+    def test_image_cache_big_file_and_stop(self):
+        """Файл больше 64 КБ — запись и чтение байт в байт (32-битные смещения); ответ «хватит»
+        посреди чтения — итог 2, файл на карте цел."""
+        big = bytes((i * 131 + i // 300) & 255 for i in range(70000))
+        ops = [(3, b"BIGFILE0.IMG", big), (2, b"BIGFILE0.IMG", None),
+               (2, b"BIGFILE0.IMG", None, 10000)]              # второе чтение — «хватит» после 10000 байт
+        esp = CacheEsp(ops)
+        disk = disk_image()
+        Machine(disk, esp).run()
+        r = esp.results
+        self.assertEqual([x[2] for x in r], [0, 0, 2], r)
+        self.assertEqual(r[1][4], big)
+        self.assertEqual(r[2][4], big[:16384])                  # две порции DMA по 8 КБ — и «хватит»
+        self.assertEqual(cache_files(disk), {"BIGFILE0.IMG": big})
+        # прошивка 0.1.121, браузер разрешил порции DMA: 70000 байт — 9 порций по 8 КБ, не 69 кадров
+        self.assertGreaterEqual(esp.big_frames, 8)
+
+    def test_image_cache_read_by_frames_without_media(self):
+        """Порции DMA команде 79 не разрешены (старый TSAFARI.ELF): чтение — кадрами по 1016, файл
+        байт в байт."""
+        big = bytes((i * 71 + i // 900) & 255 for i in range(30000))
+        esp = CacheEsp([(3, b"BIGFILE2.IMG", big), (2, b"BIGFILE2.IMG", None)])
+        esp.media = False
+        disk = disk_image()
+        Machine(disk, esp).run()
+        r = esp.results
+        self.assertEqual([x[2] for x in r], [0, 0], r)
+        self.assertEqual(r[1][4], big)
+        self.assertEqual(esp.big_frames, 0)
+
+    def test_image_cache_write_stopped_then_again(self):
+        """Запись, прерванная ответом «хватит» (браузеру срочно нужно чтение, imgcache.c), — итог 2,
+        готового файла нет; та же запись снова — файл байт в байт, недописанного «.$$$» в списке нет."""
+        big = bytes((i * 29 + i // 700) & 255 for i in range(70000))
+        ops = [(3, b"BIGFILE1.IMG", big, 20000), (3, b"BIGFILE1.IMG", big), (1, b"", None),
+               (2, b"BIGFILE1.IMG", None)]
+        esp = CacheEsp(ops)
+        disk = disk_image()
+        Machine(disk, esp).run()
+        r = esp.results
+        self.assertEqual([x[2] for x in r], [2, 0, 0, 0], r)
+        self.assertEqual(r[3][4], big)
+        self.assertEqual([n for n, *_ in r[2][4] if "BIGFILE1" in n], ["BIGFILE1.IMG"])
+        self.assertEqual(cache_files(disk), {"BIGFILE1.IMG": big})
 
     def test_esp_cannot_start_reports_error(self):
         esp = Esp(start_answer=0xFE)

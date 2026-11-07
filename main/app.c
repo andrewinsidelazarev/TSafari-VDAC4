@@ -28,6 +28,7 @@
 #include "demo.h"
 #include "fetch.h"
 #include "download.h"
+#include "imgcache.h"
 #include "charset.h"
 #include "html.h"
 #include "form.h"
@@ -161,15 +162,26 @@ static int nx_expand;                    /* сколько фреймов уже
  * которой в HTML не задан, — страницу пора разложить заново (relayout_at); для этого тело
  * обычной страницы хранится (page_body), у фреймов — их тела в fr[]. */
 static int img_busy;                     /* идёт загрузка картинки img_url */
+static int img_card;                     /* … с карты Evo (кэш картинок, imgcache.h), а не из сети */
+static int img_fresh;                    /* «обновить»: картинки — из сети, в кэш — заново */
+static int img_left;                     /* загрузку картинки бросили: ушла далеко (image_far) */
+static int img_rewrite;                  /* точки с карты не подошли — из сети, и в кэш заново */
+static int ram_big;                      /* RAM_G переключена в 3 МБ (вернуть 2 МБ при выходе) */
 static char img_url[URL_MAX];
 static uint32_t relayout_at;             /* когда разложить страницу заново; 0 — не нужно */
 static uint8_t *page_body;               /* тело страницы на экране (для переразметки) */
 static size_t page_len;
 static char page_ct[96];
 
+/* Картинка, если грузилась с карты, — брошена (из сети её бросает новая загрузка). */
+static void img_drop(void) {
+    if (img_busy && img_card) imgcache_read_cancel();
+    img_busy = img_card = img_left = img_rewrite = 0;
+}
+
 /* Загрузить адрес как страницу; картинка, если грузилась, — брошена. */
 static void net_go(const char *url) {
-    img_busy = 0;
+    img_drop();
     relayout_at = 0;
     fetch_start(url);
 }
@@ -264,6 +276,45 @@ static int is_visited(const char *url) {
 }
 
 /* Новая страница на экране: верх, кольцо целиком. */
+static int show_new_page(void);
+
+/* Картинка по ссылке (тип image/…) — страница из одной этой картинки, как у браузеров: HTML
+ * «<img src=адрес>» по середине, имя файла — в заголовке. Сами байты картинки — сразу ей
+ * (image_loaded), второй раз из сети не идут; из сети — и в кэш на карте, как картинки страниц.
+ * Страница (page_body) — этот HTML: по нему раскладка заново, когда станет известен размер. */
+static int show_image_page(const fetch_result_t *r) {
+    const char *name = strrchr(r->url, '/');
+    name = name && name[1] ? name + 1 : r->url;
+    size_t cap = 2 * strlen(r->url) + strlen(name) + 160, n = 0;
+    char *html = ts_alloc(cap * 3);
+    if (!html) {
+        html_error_page(r->url, "Cannot open the page", "no memory");
+        return show_new_page();
+    }
+    /* адрес — в атрибут: & " < > — так, чтобы разбор HTML вернул тот же адрес */
+    n += (size_t)snprintf(html + n, cap * 3 - n, "<html><head><title>");
+    for (const char *s = name; *s && n + 8 < cap * 3; s++)
+        n += (size_t)snprintf(html + n, cap * 3 - n, "%s", *s == '<' ? "&lt;" : *s == '&' ? "&amp;" : (char[2]){*s, 0});
+    n += (size_t)snprintf(html + n, cap * 3 - n, "</title></head><body><p align=\"center\"><img src=\"");
+    for (const char *s = r->url; *s && n + 8 < cap * 3; s++)
+        n += (size_t)snprintf(html + n, cap * 3 - n, "%s", *s == '&' ? "&amp;" : *s == '"' ? "%22" :
+                              *s == '<' ? "%3C" : *s == '>' ? "%3E" : (char[2]){*s, 0});
+    n += (size_t)snprintf(html + n, cap * 3 - n, "\"></p></body></html>");
+    image_clear();
+    html_render((const uint8_t *)html, n, "text/html", r->url);
+    uint8_t *img = fetch_take_body();
+    size_t len = r->length;
+    ts_log("tsafari: %s: image %s, %u bytes in %u ms", r->url, r->content_type, (unsigned)len, (unsigned)r->took);
+    if (page_body) ts_core->free(page_body);
+    page_body = (uint8_t *)html;
+    page_len = n;
+    snprintf(page_ct, sizeof(page_ct), "text/html");
+    int ok = show_new_page();
+    if (img && image_loaded(r->url, img, len, img_fresh ? 2 : 1) && !relayout_at)
+        relayout_at = ts_core->millis() + 700;          /* размер картинки известен — разложить */
+    return ok;
+}
+
 static int show_new_page(void) {
     snprintf(shown_url, sizeof(shown_url), "%s", current);
     target = 0;
@@ -318,6 +369,7 @@ static void page_moved(const char *url) {
  * грузится, на экране остаётся прежняя страница, а глобус вращается. */
 static int open_url(const char *url, int push) {
     frames_abort();
+    img_fresh = 0;
     snprintf(current, sizeof(current), "%s", url);
     ui_set_url(url);
     visit(url);
@@ -328,7 +380,7 @@ static int open_url(const char *url, int push) {
         loading = 0;
         ui_set_busy(0);
         frames_clear();
-        img_busy = 0;
+        img_drop();
         relayout_at = 0;
         image_clear();
         image_layout_begin();
@@ -490,7 +542,7 @@ static int submit_form(form_submit_t *s) {
         history_ui();
         loading = 1;
         ui_set_busy(1);
-        img_busy = 0;
+        img_drop();
         relayout_at = 0;
         fetch_post(s->url, s->body, s->body_len);
     }
@@ -527,8 +579,13 @@ static int open_history(int at) {
  * остаётся; обычная страница — заново по адресу. */
 static int reload(void) {
     nav_pushed = 0;
-    if (!fr_n) return open_url(current, 0);
+    if (!fr_n) {
+        int ok = open_url(current, 0);
+        img_fresh = 1;                           /* картинки — из сети, кэш — заново */
+        return ok;
+    }
     frames_abort();
+    img_fresh = 1;
     if (loading) fetch_cancel();
     memcpy(nx, fr, sizeof(fr[0]) * (size_t)fr_n);
     nx_n = fr_n;
@@ -546,8 +603,19 @@ static int fetch_step(void) {
     if (img_busy) {                              /* это была картинка: в память видеочипа */
         img_busy = 0;
         if (!loading) ui_set_busy(0);
-        int ok_img = st == FETCH_DONE && !r->error[0];
-        if (image_loaded(img_url, ok_img ? r->body : NULL, ok_img ? r->length : 0) && !relayout_at)
+        int dropped = img_left;
+        img_left = 0;
+        if (dropped && st == FETCH_CANCELLED) {  /* бросили сами — загрузится, когда подойдёт */
+            image_requeue(img_url);
+            return 1;
+        }
+        int ok_img = st == FETCH_DONE && !r->error[0] && r->length;
+        size_t n = ok_img ? r->length : 0;
+        uint8_t *b = ok_img ? fetch_take_body() : NULL;   /* файл — картинке, без копии (image.c) */
+        /* из сети: разобранную картинку image.c запишет в кэш на карте Evo (imgcache.c) */
+        int again = img_fresh || img_rewrite;
+        img_rewrite = 0;
+        if (image_loaded(img_url, b, b ? n : 0, again ? 2 : 1) && !relayout_at)
             relayout_at = ts_core->millis() + 700;   /* не чаще: картинки приходят одна за другой */
         return 1;
     }
@@ -587,6 +655,7 @@ static int fetch_step(void) {
     }
     internal_page = 0;
     frames_clear();
+    if (st != FETCH_FAILED && !strncmp(r->content_type, "image/", 6)) return show_image_page(r);
     if (st == FETCH_FAILED) {
         html_error_page(r->url, "Cannot open the page", r->error);
     } else {
@@ -661,8 +730,15 @@ static int browser_init(void) {
         return 0;
     }
     if (!ui_init()) { fail("UI ASSETS UPLOAD FAILED"); return 0; }
+    /* RAM_G 3 МБ — пул картинок до 0x300000 (ft.c, ft_ramg_3mb); не вышло — 2 МБ, как раньше */
+    ram_big = ft_ramg_3mb(1);
+    image_pool(ram_big);
+    ts_log("tsafari: RAM_G %s, image pool %u KB", ram_big ? "3 MB" : "2 MB",
+           (unsigned)(((ram_big ? 0x300000u : 0x200000u) - 0x114000u) / 1024u));
     net_ready = fetch_init();
+    if (!image_init()) ts_log("tsafari: no image task: GIF, WebP and SVG will not be decoded");
     download_init();
+    imgcache_init();
     html_set_visited(is_visited);
     if (!net_ready) ts_log("tsafari: no net_open in this firmware: pages cannot be loaded");
     hist_n = hist_at = 0; loading = 0;
@@ -682,6 +758,7 @@ static int browser_init(void) {
 static int browser_step(uint32_t now) {
     wifi_step(now);
     download_tick(now);
+    imgcache_tick(now);
     mouse_state_t m;
     input_mouse(&m);
     cx += m.dx * MOUSE_GAIN; cy += m.dy * MOUSE_GAIN;
@@ -752,7 +829,13 @@ static int browser_step(uint32_t now) {
         ok = reload();
     } else if (act == UI_STOP) {
         if (loading) fetch_cancel();
-        else if (img_busy) { fetch_cancel(); image_stop(); }   /* стоп — картинки больше не грузить */
+        else if (img_busy && img_card) {                /* стоп — картинки больше не грузить */
+            imgcache_read_cancel();
+            img_busy = img_card = 0;
+            if (!loading) ui_set_busy(0);
+            image_loaded(img_url, NULL, 0, 0);
+            image_stop();
+        } else if (img_busy) { fetch_cancel(); image_stop(); }
         else if (download_busy()) download_cancel();   /* Esc при записи файла — отмена */
     } else if (act == UI_DL_CANCEL) {                  /* крестик индикатора */
         if (loading && net_file) fetch_cancel();
@@ -763,15 +846,56 @@ static int browser_step(uint32_t now) {
         ok = open_history(hist_at + 1);
     }
     if (submit && ok) ok = submit_form(&sub);
+    image_view(page_top());                      /* прокрутка — картинкам: что видно, что далеко */
+    /* картинка, что грузится, ушла далеко (страницу пролистали) — бросить: картинки идут по одной,
+     * а она держит видимые; вернётся, когда к ней подойдут */
+    if (ok && img_busy && !img_left && image_far(img_url, page_top())) {
+        if (img_card) {
+            imgcache_read_cancel();
+            img_busy = img_card = 0;
+            if (!loading) ui_set_busy(0);
+            image_requeue(img_url);
+        } else {
+            img_left = 1;                        /* итог «отменена» примет fetch_step */
+            fetch_cancel();
+        }
+    }
     if (ok) ok = fetch_step();
+    if (ok && img_busy && img_card) {            /* картинка с карты Evo (imgcache.c) */
+        uint8_t *b = NULL;
+        size_t n = 0;
+        int kind = IMGCACHE_FILE;
+        int r = imgcache_read_poll(&b, &n, &kind);
+        if (r > 0) {
+            img_card = 0;
+            /* точки экрана — сразу в видеочип; файл (JPEG, PNG; WebP от прежней версии) — разобрать */
+            int rl = kind == IMGCACHE_PIX ? image_cached(img_url, b, n) : image_loaded(img_url, b, n, 3);
+            if (rl < 0) {                        /* точки не подошли месту — из сети, в кэш заново */
+                img_rewrite = 1;
+                fetch_start_image(img_url);
+            } else {
+                img_busy = 0;
+                if (!loading) ui_set_busy(0);
+                if (rl && !relayout_at) relayout_at = ts_core->millis() + 700;
+            }
+        } else if (r < 0) {                      /* с карты не вышло — из сети */
+            img_card = 0;
+            fetch_start_image(img_url);
+        }
+    }
+    /* фоновая задача разобрала GIF, WebP или SVG — точки в видеочип (image.c) */
+    if (ok && image_poll() && !relayout_at) relayout_at = ts_core->millis() + 700;
     /* картинки страницы — по одной, когда страница уже на экране (сначала видимые) */
     if (ok && !loading && !nx_loading && !img_busy && !ui_wifi_open()) {
         const char *u = image_next(page_top());
         if (u) {
             snprintf(img_url, sizeof(img_url), "%s", u);
             img_busy = 1;
+            img_rewrite = 0;
             ui_set_busy(1);
-            fetch_start_image(img_url);
+            /* есть в кэше на карте — оттуда (кроме «обновить»), иначе — из сети */
+            img_card = !img_fresh && imgcache_read_start(img_url);
+            if (!img_card) fetch_start_image(img_url);
         }
     }
     int relaid = 0;
@@ -807,6 +931,7 @@ static void browser_task(void *arg) {
             if (r == 0) ts_core->delay(4);
         }
     if (state == ST_EXIT) ts_log("tsafari: exit by F12");
+    if (ram_big) ft_ramg_3mb(0);                 /* RAM_G — снова 2 МБ: шрифты ПЗУ — программам Evo */
     __atomic_store_n(&task_done, 1, __ATOMIC_RELEASE);
 }
 
@@ -814,7 +939,10 @@ static void browser_task(void *arg) {
  * Вызывается в задаче обмена прошивки (не в задаче браузера!), поэтому должна отвечать сразу:
  * Z80 ждёт ответа. На каждую команду — ответ reply (код ответа, байты). */
 static int command(uint8_t cmd, const uint8_t *p, uint16_t n) {
-    if (cmd == 0x76 || cmd == 0x77) return download_command(cmd, p, n);   /* загрузки на карту */
+    /* загрузки и кэш картинок на карте: у кэша — старший бит номера (imgcache.h) */
+    if (cmd == 0x78 || cmd == 0x79) return imgcache_command(cmd, p, n);
+    if (cmd == 0x76 || cmd == 0x77)
+        return n >= 2 && (p[1] & 0x80) ? imgcache_command(cmd, p, n) : download_command(cmd, p, n);
     if (cmd == 0x75) {                 /* [джойстик, кнопки мыши, X, Y, байты PS/2…] */
         uint8_t ok = n >= 4;
         if (ok) input_packet(p, n);
@@ -852,6 +980,11 @@ static int start(const zm_core_t *c) {
     input_init();
     ts_running = 1;
     task_done = 0;
+    /* Прошивка 0.1.121+ (ABI 1.13): куски файла кэша картинок (79) программа Z80 шлёт порциями
+     * DMA по 8 КБ без суммы, как звук плееру (~30 КБ/с кадрами по 1 КБ — мало, 07.11); файл
+     * кэша браузер сверяет сам (адрес в заголовке, длина). Старая прошивка — прежние кадры. */
+    if (c->size >= offsetof(zm_core_t, link_media) + sizeof(c->link_media) && c->link_media)
+        c->link_media(0x79, 0x79);
     int r = c->task_start(browser_task, NULL, 12288, 1, 0);
     if (r != ZM_OK) {
         task_done = 1; ts_running = 0;
@@ -861,12 +994,14 @@ static int start(const zm_core_t *c) {
     return ZM_OK;
 }
 
-/* Остановка: ts_running = 0 — все циклы выходят; ждём обе задачи (до 17 с), иначе прошивка
- * выгрузит код, который ещё выполняется. */
+/* Остановка: ts_running = 0 — все циклы выходят; ждём все три задачи — браузер, загрузку и разбор
+ * картинок (до 17 с: большой WebP разбирается до ~10 с), иначе прошивка выгрузит код, который ещё
+ * выполняется. */
 static void stop(void) {
     __atomic_store_n(&ts_running, 0, __ATOMIC_RELEASE);
     /* ft_open при первом переходе в Slot1 ждёт до 15 с: дать задачам выйти до снятия объектов */
-    for (unsigned i = 0; i < 1700 && !(__atomic_load_n(&task_done, __ATOMIC_ACQUIRE) && fetch_stopped()); i++)
+    for (unsigned i = 0; i < 1700 && !(__atomic_load_n(&task_done, __ATOMIC_ACQUIRE) && fetch_stopped() &&
+                                       image_stopped()); i++)
         ts_core->delay(10);
 }
 
@@ -883,7 +1018,7 @@ int tsafari_host_state(void) { return state; }
 int main(int argc, char **argv) {
     static const zm_app_t app = {
         .size = sizeof(zm_app_t), .abi_major = ZM_APP_ABI_MAJOR, .abi_minor = ZM_APP_ABI_MINOR,
-        .name = "tsafari", .version = TS_VERSION, .command_first = 0x73, .command_last = 0x77,
+        .name = "tsafari", .version = TS_VERSION, .command_first = 0x73, .command_last = 0x79,
         .start = start, .stop = stop, .command = command, .poll = NULL,
     };
     if (argc != 3) return 0;

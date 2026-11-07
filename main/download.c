@@ -18,6 +18,7 @@
 #include "download.h"
 #include "charset.h"
 #include "font.h"
+#include "imgcache.h"
 #include "ts.h"
 
 #define PIECE 246                        /* данных в одном ответе F6: кадр к Z80 ≤ 256 байт */
@@ -185,7 +186,7 @@ int download_start(uint8_t *body, size_t length, const char *url, const char *di
         stalled = 0;
         size = (uint32_t)length;
         sent = 0;
-        seq++;
+        seq = (uint16_t)((seq + 1) & 0x7FFFu);           /* старший бит номера — у кэша картинок */
         cancel = 0;
         event_due = 1;
         last = ts_core->millis();
@@ -227,7 +228,7 @@ int download_stream_begin(const char *url, const char *disposition, uint32_t tot
         stalled = 0;
         size = total ? total : SIZE_UNKNOWN;
         sent = 0;
-        seq++;
+        seq = (uint16_t)((seq + 1) & 0x7FFFu);           /* старший бит номера — у кэша картинок */
         cancel = 0;
         event_due = 1;
         last = ts_core->millis();
@@ -313,14 +314,16 @@ void download_cancel(void) {
 }
 
 /* Событие E7 [номер][размер][имя, 0] — не ждать места в очереди (wait 0): не ушло — уйдёт
- * на следующем проходе. Сроки: программа Z80 не начала брать куски за START_MS (старая
+ * на следующем проходе. Пока программа Z80 занята кэшем картинок (imgcache.c), событие ждёт:
+ * она бы его не услышала. Сроки: программа Z80 не начала брать куски за START_MS (старая
  * TSAFARI.SPG этого события не знает) или замолчала посреди файла на STALL_MS. */
 void download_tick(uint32_t now) {
     uint8_t ev[6 + DL_NAME_MAX + 1];
     uint16_t len = 0;
     uint8_t *drop = NULL;
     ts_core->mutex_lock(mutex);
-    if (event_due && state == DL_WAIT) {
+    if (event_due && state == DL_WAIT && imgcache_busy()) last = now;   /* срок — с отправки */
+    if (event_due && state == DL_WAIT && !imgcache_busy()) {
         wr16(ev, seq);
         wr32(ev + 2, size);
         size_t k = strlen(card_name) + 1;
