@@ -30,6 +30,13 @@ void page_begin(uint32_t bg);
 int page_rect(int x, int y, int w, int h, uint32_t rgb);
 /* Высота прямоугольника, когда она стала известна (фон блока под абзацами). */
 void page_rect_height(int index, int h);
+/* Коробка CSS (doc_cssbox_begin): заливка fill, рамка border толщиной bw (0 — без рамки), углы
+ * скруглены радиусом radius (0 — прямые); under — цвет под коробкой (к нему сглаживаются углы).
+ * Высоту, как у page_rect, дописывают потом — page_rect_height. Номер элемента или −1. */
+int page_box(int x, int y, int w, int h, uint32_t fill, uint32_t border, int bw, int radius, uint32_t under);
+/* Рамка коробки index разной толщины по сторонам (верх, право, низ, лево; 0…15 точек; без
+ * скругления): так рисуются border-top, border-bottom… */
+void page_box_sides(int index, int t, int r, int b, int l);
 /* Строка глифов одной строкой (без переноса) начертанием face (font.h); y — верх клетки
  * начертания (базовая линия — y + font_faces[face].baseline). bg — цвет фона под ней
  * (сглаживание считается к нему). flags — PAGE_UNDERLINE, PAGE_BOLD. link ≥ 0 — номер ссылки. */

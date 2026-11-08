@@ -1,6 +1,8 @@
 ; Кэш картинок браузера на карте Evo: папка Cache\Images рядом с TSAFARI.SPG и TSAFARI.ELF
-; (в папке программы, GameDir). Картинка, пришедшая из сети, остаётся на карте файлом, и в
-; следующий раз браузер берёт её отсюда. Что лежит в кэше, когда что читать, писать и удалять
+; (в папке программы, GameDir), таблицы стилей — Cache\CSS (пользователь 07.11). Картинка или
+; таблица стилей, пришедшая из сети, остаётся на карте файлом, и в следующий раз браузер берёт её
+; отсюда. Папку выбирает имя файла: «XXXXXXXX.CSS» (и недописанный «XXXXXXXX.CSS.$$$») — Cache\CSS,
+; остальные — Cache\Images; список папки CSS — событие 1 с именем «.CSS». Что лежит в кэше, когда что читать, писать и удалять
 ; (кольцо на 100 МБ), решает браузер — main/imgcache.c; здесь — только работа с картой.
 ;
 ; ЗАЧЕМ Z80. ESP32 до карты не достаёт: писать и читать её умеет только эта программа через
@@ -104,16 +106,51 @@ ServeCache:
         ld a,FAT32_BAD_ARGUMENT         ; неизвестная операция
         jp CacheCard
 
-; Папка Cache\Images в папке программы; недостающие создаются (fat_ensure_dir, zifi_save.asm).
-; Выход: Z — она текущая; NZ — код в A.
+; Папка Cache\Images (или Cache\CSS — по имени FILE_NAME, CacheIsCss) в папке программы;
+; недостающие создаются (fat_ensure_dir, zifi_save.asm). Выход: Z — она текущая; NZ — код в A.
 CacheDir:
         ld hl,GameDir
         call FAT32_SET_DIR_CLUSTER      ; без кода итога (API 10)
         ld hl,DIR_cache
         call fat_ensure_dir
         ret nz
+        call CacheIsCss
+        ld hl,DIR_css
+        jp z,fat_ensure_dir
         ld hl,DIR_images
         jp fat_ensure_dir
+
+; Таблица стилей ли это: после первой точки имени FILE_NAME — «CSS», а за ним конец имени или
+; ещё точка («.CSS.$$$»). Выход: Z — да, NZ — нет.
+CacheIsCss:
+        ld hl,FILE_NAME
+.dot:
+        ld a,(hl)
+        or a
+        jr z,.no
+        inc hl
+        cp '.'
+        jr nz,.dot
+        ld a,(hl)
+        cp 'C'
+        ret nz
+        inc hl
+        ld a,(hl)
+        cp 'S'
+        ret nz
+        inc hl
+        ld a,(hl)
+        cp 'S'
+        ret nz
+        inc hl
+        ld a,(hl)
+        or a
+        ret z
+        cp '.'
+        ret
+.no:
+        inc a                           ; A было 0 — стало 1: NZ
+        ret
 
 ; Список: записи каталога (драйвер — NXTETY) — кадрами 78 до CACHE_FILL_MAX байт.
 CacheList:
@@ -586,3 +623,4 @@ CacheFx: db FILEX_BLOCK_SIZE,FILEX_API_VERSION,FILEX_OP_READ_AT,0   ; FILEX: ч�
         ds FILEX_BLOCK_SIZE-4
 DIR_cache: db #10,"Cache",0
 DIR_images: db #10,"Images",0
+DIR_css: db #10,"CSS",0

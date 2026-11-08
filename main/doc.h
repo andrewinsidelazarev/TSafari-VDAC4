@@ -27,10 +27,11 @@
 
 enum { DOC_LEFT, DOC_CENTER, DOC_RIGHT };
 
+#define DOC_NOWRAP 0x80u        /* флаг стиля: white-space: nowrap — здесь строку не переносить */
 typedef struct {
     uint32_t fg;             /* цвет букв 0xRRGGBB */
     uint32_t bg;             /* цвет фона под буквами; 0 — фон страницы, блока или ячейки */
-    unsigned flags;          /* PAGE_UNDERLINE — подчеркнуть, PAGE_BOLD — жирный */
+    unsigned flags;          /* PAGE_UNDERLINE — подчеркнуть, PAGE_BOLD — жирный; DOC_NOWRAP — без переносов */
     int link;                /* номер ссылки (html.c); −1 — не ссылка */
     unsigned face;           /* начертание FACE_… (font.h); 0 — основной текст 20 px */
 } doc_style_t;
@@ -71,8 +72,52 @@ void doc_para(const char *const *texts, const doc_style_t *styles, unsigned part
 int doc_box_begin(uint32_t bg, int pad_x, int pad_y, uint32_t bar);
 /* Конец блока с фоном; дальше — промежуток gap точек. */
 void doc_box_end(int gap);
+/* Коробка CSS блока (упрощённый CSS, 07.11): поля снаружи (margin; auto слева и справа —
+ * по середине), рамка (border: толщина каждой стороны и один цвет), поля внутри (padding),
+ * ширина (width — по внешнему краю, как box-sizing: border-box: html.c переводит в неё ширину
+ * содержимого; max-width), наименьшая высота (height, тоже по внешнему краю), скругление углов
+ * (border-radius), фон. Все размеры — в точках. */
+typedef struct {
+    int mt, mb, ml, mr;                  /* margin */
+    uint8_t auto_l, auto_r;              /* margin-left/right: auto */
+    int bt, br, bb, bl;                  /* толщина рамки сверху, справа, снизу, слева (0 — нет) */
+    uint32_t bc;                         /* цвет рамки */
+    int pt, pb, pl, pr;                  /* padding */
+    int w, maxw, h;                      /* width, max-width (0 — не задано), height */
+    int radius;                          /* border-radius */
+    uint32_t bg;                         /* фон (0 — без своего) */
+} doc_box_t;
+/* Открыть коробку: следующие строки — в её рамке (вложенные коробки — можно, как таблица в
+ * ячейке). Фон с рамкой — элемент страницы (page_box), его высота станет известна в
+ * doc_cssbox_end. 0 — не открыта (рамок слишком много). */
+int doc_cssbox_begin(const doc_box_t *b);
+/* Закрыть коробку: высота — по содержимому (не меньше height), дальше — margin снизу. */
+void doc_cssbox_end(void);
 /* Где сейчас низ (куда ляжет следующая строка), в точках. */
 int doc_y(void);
+/* Место для содержимого здесь: левый край, верх (с отложенным промежутком), ширина. */
+void doc_here(int *x, int *y, int *w);
+/* Абзац, который сейчас набирается (ещё не выведен), — отложить (doc_para_hold: в кучу; NULL —
+ * отложить нечего или нет памяти, тогда новая рамка закончит его, как обычно) и вернуть
+ * (doc_para_back, память освобождается). Для элемента вне потока посреди строки (position:
+ * absolute): его рамка (doc_frame_push) иначе вывела бы набранное и строка оборвалась бы. */
+void *doc_para_hold(void);
+void doc_para_back(void *held);
+/* Плавающие элементы (CSS float). Плавающий — прямоугольник у левого или правого края, строки и
+ * коробки блоков рядом с ним встают в оставшуюся полосу (обтекают). doc_float_place — где встать
+ * плавающему шириной w (right — у правого края): у края, рядом с прежними плавающими, а не
+ * влезает — ниже них; doc_float_add — занять место (x, y, w, h) после того, как он разложен.
+ * doc_float_mark — сколько их сейчас (метка), doc_float_clear — спуститься ниже плавающих после
+ * метки (side: 1 левые, 2 правые, 3 все; clear в CSS и «контейнер вмещает своих плавающих»).
+ * Рамка (ячейка, коробка CSS) при закрытии опускает свой низ под свои плавающие и забывает их. */
+void doc_float_place(int w, int right, int *x, int *y);
+void doc_float_add(int x, int y, int w, int h, int right);
+int doc_float_mark(void);
+void doc_float_clear(int mark, int side);
+/* Отложенный промежуток перед следующей строкой (doc_flush копит наибольший): узнать и заменить
+ * (margin-top из CSS заменяет промежуток блока по умолчанию). */
+int doc_get_gap(void);
+void doc_set_gap(int px);
 /* Левый край и ширина места для строк в текущей рамке (с отступом и полями блока). */
 int doc_x(void);
 int doc_width(void);
@@ -94,4 +139,6 @@ int doc_frame_pop(void);
 void doc_measure_push(void);
 void doc_measure_pop(int *min_w, int *max_w);
 void doc_measure_add(int min_w, int max_w);
+/* То же для плавающего: плавающие подряд — в ряд, их ширины складываются. */
+void doc_measure_float(int min_w, int max_w);
 int doc_measuring(void);

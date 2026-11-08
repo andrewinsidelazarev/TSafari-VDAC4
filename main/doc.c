@@ -45,13 +45,25 @@ typedef struct {
     int box_rect, box_bar, box_y;        /* открытый блок с фоном: прямоугольники и верх */
     int pad_x, pad_y;                    /* поля блока */
     uint32_t box_bg;
+    uint8_t css;                         /* рамка — коробка CSS (doc_cssbox_begin) */
+    int fl_mark;                         /* сколько плавающих было, когда рамка открылась */
+    int fl_base;                         /* плавающие с этого номера видны её строкам: у ячейки, колонки
+                                          * flex, самого плавающего (doc_frame_push) — только свои (в CSS
+                                          * это отдельный «контекст», BFC); у коробки блока — как у родителя */
+    int css_item, css_y, css_h, css_mb, css_pb, css_bw;   /* её фон, верх, наименьшая высота, низ */
 } frame_t;
 
 static frame_t fs[MAX_FRAMES];
 static int fn;                           /* рамок в стеке; текущая — fs[fn − 1] */
 #define F (&fs[fn - 1])
 
-static struct { int min, max; } ms[MAX_FRAMES];
+static struct { int min, max, frun; } ms[MAX_FRAMES];   /* frun — ширина плавающих подряд (в ряд) */
+
+/* Плавающие элементы (doc.h): занятые прямоугольники в координатах страницы. Свои у рамки — с её
+ * метки fl_mark и до конца списка; у рамки, которая закрылась, они забываются. */
+#define FLOAT_MAX 96
+static struct { int x1, x2, top, bottom; uint8_t right; } fl[FLOAT_MAX];
+static int fl_n;
 static int mn;                           /* > 0 — идёт измерение, ms[mn − 1] — текущее */
 
 static uint16_t cells[MAX_CELLS];        /* глифы текущего абзаца (DOC_INLINE — блок) */
@@ -73,12 +85,49 @@ void doc_begin(uint32_t bg) {
     F->box_rect = F->box_bar = -1;
     F->bg = bg;
     mn = 0;
+    fl_n = 0;
     cell_n = 0; style_n = 0; inl_n = 0;
     space_glyph = (uint16_t)font_lookup(' ');
 }
 
 void doc_set_inline_cb(void (*place)(int id, int x, int y)) { inline_place = place; }
 int doc_y(void) { return F->y + F->pending; }
+void doc_here(int *x, int *y, int *w) { *x = doc_x(); *y = F->y + F->pending; *w = doc_width(); }
+
+/* Отложенный абзац: сколько чего и сами клетки, стили, встроенные блоки — подряд за заголовком. */
+typedef struct { unsigned cells, styles, inls; int hang; } held_t;
+void *doc_para_hold(void) {
+    if (!cell_n) return NULL;
+    size_t sz = sizeof(held_t) + cell_n * (sizeof(cells[0]) + sizeof(cell_style[0])) + style_n * sizeof(styles[0]) +
+                inl_n * sizeof(inl[0]) + 8;
+    held_t *h = ts_alloc(sz);
+    if (!h) return NULL;
+    h->cells = cell_n; h->styles = style_n; h->inls = inl_n;
+    h->hang = F->hang;                                /* висячая первая строка — его */
+    uint8_t *p = (uint8_t *)(h + 1);
+    memcpy(p, styles, style_n * sizeof(styles[0])); p += style_n * sizeof(styles[0]);
+    memcpy(p, inl, inl_n * sizeof(inl[0])); p += inl_n * sizeof(inl[0]);
+    memcpy(p, cells, cell_n * sizeof(cells[0])); p += cell_n * sizeof(cells[0]);
+    memcpy(p, cell_style, cell_n * sizeof(cell_style[0]));
+    cell_n = 0; style_n = 0; inl_n = 0;
+    return h;
+}
+
+void doc_para_back(void *held) {
+    held_t *h = held;
+    if (!h) return;
+    doc_flush(0);                                     /* своё (если набралось) — до отложенного */
+    const uint8_t *p = (const uint8_t *)(h + 1);
+    style_n = h->styles; inl_n = h->inls; cell_n = h->cells;
+    memcpy(styles, p, style_n * sizeof(styles[0])); p += style_n * sizeof(styles[0]);
+    memcpy(inl, p, inl_n * sizeof(inl[0])); p += inl_n * sizeof(inl[0]);
+    memcpy(cells, p, cell_n * sizeof(cells[0])); p += cell_n * sizeof(cells[0]);
+    memcpy(cell_style, p, cell_n * sizeof(cell_style[0]));
+    F->hang = h->hang;
+    ts_core->free(h);
+}
+int doc_get_gap(void) { return F->pending; }
+void doc_set_gap(int px) { F->pending = px < 0 ? 0 : px; }
 int doc_empty(void) { return cell_n == 0; }
 int doc_measuring(void) { return mn > 0; }
 void doc_indent(int px) { F->indent = px < 0 ? 0 : px > F->w / 2 ? F->w / 2 : px; }
@@ -93,6 +142,28 @@ int doc_width(void) { int w = F->w - F->indent - 2 * F->pad_x; return w > 1 ? w 
 /* Фон под текстом: блока, если он открыт, иначе рамки (к нему считается сглаживание). */
 static uint32_t current_bg(void) { return F->box_bg ? F->box_bg : F->bg; }
 uint32_t doc_bg(void) { return current_bg(); }
+
+/* Свободная полоса на высоте y..y+h: от левого края места (с отступом) до правого, минус
+ * плавающие, которые эту высоту занимают и заходят в место рамки. */
+static void band(int y, int h, int *l, int *r) {
+    int L = doc_x(), R = L + doc_width(), l0 = L, r0 = R;
+    for (int i = F->fl_base; i < fl_n; i++) {
+        if (fl[i].bottom <= y || fl[i].top >= y + h || fl[i].x2 <= l0 || fl[i].x1 >= r0) continue;
+        if (fl[i].right) { if (fl[i].x1 < R) R = fl[i].x1; }
+        else if (fl[i].x2 > L) L = fl[i].x2;
+    }
+    *l = L;
+    *r = R > L ? R : L;
+}
+
+/* Ближайший низ плавающих, занимающих высоту y (ниже — полоса шире); 0 — таких нет. */
+static int float_below(int y, int h) {
+    int l0 = doc_x(), r0 = l0 + doc_width(), best = 0;
+    for (int i = F->fl_base; i < fl_n; i++)
+        if (fl[i].bottom > y && fl[i].top < y + h && fl[i].x2 > l0 && fl[i].x1 < r0 && (!best || fl[i].bottom < best))
+            best = fl[i].bottom;
+    return best;
+}
 
 /* Ширина клетки: у буквы — шаг её начертания, у блока — его ширина. */
 static int cell_w(unsigned i) {
@@ -139,7 +210,7 @@ static void emit_line(unsigned from, unsigned to, int left, int avail) {
         const font_face_t *f = &font_faces[s->face];
         if (s->bg) page_rect(x, F->y, (int)(j - i) * f->w, asc + desc, s->bg);   /* свой фон под текстом */
         page_text(x, F->y + asc - f->baseline, s->face, cells + i, j - i, s->fg, s->bg ? s->bg : current_bg(),
-                  s->flags, s->link);
+                  s->flags & ~DOC_NOWRAP, s->link);
         x += (int)(j - i) * f->w;
         i = j;
     }
@@ -147,11 +218,15 @@ static void emit_line(unsigned from, unsigned to, int left, int avail) {
 }
 
 /* Измерение абзаца: самое длинное неразрывное и вся длина без переносов (+ отступ и поля). */
+/* Клетка без переноса (white-space: nowrap): пробел в ней — не место переноса. */
+static int nowrap(unsigned i) { return cells[i] != DOC_INLINE && (styles[cell_style[i]].flags & DOC_NOWRAP); }
+
 static void measure_para(void) {
+    ms[mn - 1].frun = 0;                                  /* текст — ряд плавающих кончился */
     int total = 0, word = 0, best = 0;
     for (unsigned i = 0; i < cell_n; i++) {
         int w = cell_w(i);
-        if (cells[i] == space_glyph) { word = 0; total += w; continue; }
+        if (cells[i] == space_glyph && !nowrap(i)) { word = 0; total += w; continue; }
         if (cells[i] == DOC_INLINE) word = 0;
         word += w;
         total += w;
@@ -173,14 +248,28 @@ void doc_flush(int gap) {
         while (start < cell_n) {
             while (start < cell_n && cells[start] == space_glyph) start++;    /* пробелы в начале строки */
             if (start >= cell_n) break;
+            /* рядом плавающие — строка в свободную полосу; полоса уже первого слова (меньше 4 букв) —
+             * ниже плавающих */
+            if (fl_n) {
+                for (int guard = 0; guard < 32; guard++) {
+                    int ly = F->y + ((F->y > F->top || F->pending) ? F->pending : 0), l, r;
+                    band(ly, PAGE_LINE_H, &l, &r);
+                    left = l;
+                    avail = r - l;
+                    int below = avail < 48 ? float_below(ly, PAGE_LINE_H) : 0;
+                    if (!below) break;
+                    take_pending();
+                    F->y = below;
+                }
+            }
             if (F->hang) { left -= F->hang; avail += F->hang; }                /* висячая первая строка */
             int x = 0;
             unsigned i = start, brk = start;                                 /* brk — последнее место переноса */
             while (i < cell_n) {
-                int w = cell_w(i);
-                if (x + w > avail && i > start) break;
-                if (cells[i] == space_glyph || cells[i] == DOC_INLINE) brk = i;
-                if (i > start && cells[i - 1] == DOC_INLINE) brk = i;        /* перенос после блока */
+                int w = cell_w(i), nw = nowrap(i);
+                if (x + w > avail && i > start && !nw) break;               /* nowrap — дальше края, как в CSS */
+                if (!nw && (cells[i] == space_glyph || cells[i] == DOC_INLINE)) brk = i;
+                if (i > start && cells[i - 1] == DOC_INLINE && !nw) brk = i; /* перенос после блока */
                 x += w;
                 i++;
             }
@@ -282,6 +371,103 @@ void doc_box_end(int gap) {
     if (gap > F->pending) F->pending = gap;
 }
 
+/* Коробка CSS. Ширина и высота — по внешнему краю (как box-sizing: border-box — так верстает
+ * почти любой нынешний сайт, и коробка с полями не вылезает за край): width, не больше max-width;
+ * без width — всё место между полями снаружи; не шире места. margin: auto слева и справа —
+ * по середине. Верх — после промежутка сверху (margin сверху складывается с отложенным, берётся
+ * больший, как у браузеров). При измерении (таблицы) рамка тоже заводится — её поля и рамка
+ * считаются отступом, чтобы ширины ячеек их учли. */
+int doc_cssbox_begin(const doc_box_t *b) {
+    doc_flush(0);
+    if (fn == MAX_FRAMES) return 0;
+    int extra_l = b->ml + b->bl + b->pl, extra_r = b->mr + b->br + b->pr;
+    if (mn) {
+        uint32_t bgp = current_bg();
+        int align = F->align;
+        fn++;
+        memset(F, 0, sizeof(*F));
+        F->w = 1 << 14;
+        F->indent = extra_l + extra_r;
+        F->bg = bgp; F->align = align;
+        F->box_rect = F->box_bar = -1;
+        F->css = 1; F->css_item = -1;
+        F->fl_mark = fl_n;
+        F->fl_base = fs[fn - 2].fl_base;
+        if (b->w) doc_measure_add(b->w, b->w);
+        return 1;
+    }
+    if (b->mt > F->pending) F->pending = b->mt;
+    take_pending();
+    int x0 = doc_x(), avail = doc_width();
+    int inner_min = b->bl + b->br + b->pl + b->pr;
+    /* рядом плавающие — коробка в свободной полосе (её фон иначе лёг бы на них сверху); полоса
+     * совсем узкая — ниже плавающих */
+    for (int guard = 0; fl_n && guard < 32; guard++) {
+        int l, r;
+        band(F->y, 1, &l, &r);
+        int below = r - l < inner_min + 48 ? float_below(F->y, 1) : 0;
+        if (below) { F->y = below; continue; }
+        x0 = l;
+        avail = r - l;
+        break;
+    }
+    int room = avail - b->ml - b->mr;
+    int outer = b->w ? b->w : room;                   /* ширина — по внешнему краю (border-box) */
+    if (b->maxw && outer > b->maxw) outer = b->maxw;
+    if (outer > room) outer = room;
+    if (outer < inner_min + 8) outer = inner_min + 8;
+    int left = x0 + b->ml;
+    if (b->auto_l && b->auto_r) left = x0 + (avail - outer) / 2;
+    else if (b->auto_l) left = x0 + avail - outer - b->mr;
+    if (left < x0) left = x0;
+    uint32_t under = current_bg(), fill = b->bg ? b->bg : under;
+    int align = F->align;
+    int y = F->y;
+    /* рамка одной толщины — со скруглением (page_box), разной — по сторонам (page_box_sides) */
+    int border = b->bt || b->br || b->bb || b->bl, even = b->bt == b->br && b->bt == b->bb && b->bt == b->bl;
+    int item = b->bg || border ? page_box(left, y, outer, 0, fill, b->bc, even ? b->bt : 0, b->radius, under) : -1;
+    if (item >= 0 && border && !even) page_box_sides(item, b->bt, b->br, b->bb, b->bl);
+    fn++;
+    memset(F, 0, sizeof(*F));
+    F->x = left + b->bl + b->pl;
+    F->w = outer - inner_min > 1 ? outer - inner_min : 1;
+    F->y = F->top = y + b->bt + b->pt;
+    F->bg = fill;
+    F->align = align;
+    F->box_rect = F->box_bar = -1;
+    F->css = 1;
+    F->css_item = item;
+    F->css_y = y;
+    F->css_h = b->h;                                  /* высота — тоже по внешнему краю */
+    F->css_mb = b->mb;
+    F->css_pb = b->pb;
+    F->css_bw = b->bb;                                /* рамка снизу */
+    F->fl_mark = fl_n;
+    F->fl_base = fs[fn - 2].fl_base;
+    return 1;
+}
+
+/* Низ своих плавающих рамки (с её метки) — ниже него рамка и закрывается; их — забыть. */
+static void own_floats_close(void) {
+    for (int i = F->fl_mark; i < fl_n; i++) if (fl[i].bottom > F->y) F->y = fl[i].bottom;
+    if (F->fl_mark < fl_n) fl_n = F->fl_mark;
+}
+
+void doc_cssbox_end(void) {
+    doc_flush(0);
+    if (!F->css || fn < 2) return;
+    if (F->box_rect >= 0) doc_box_end(0);
+    if (mn) { fn--; return; }
+    own_floats_close();
+    int h = F->y + F->css_pb + F->css_bw - F->css_y;
+    if (h < F->css_h) h = F->css_h;
+    if (F->css_item >= 0) page_rect_height(F->css_item, h);
+    int bottom = F->css_y + h, mb = F->css_mb;
+    fn--;
+    F->y = bottom;
+    F->pending = mb;
+}
+
 void doc_skip_to(int y) {
     doc_flush(0);
     if (y > F->y) F->y = y;
@@ -298,20 +484,57 @@ void doc_frame_push(int x, int w, int y, uint32_t bg) {
     F->y = F->top = y;
     F->bg = bg ? bg : parent_bg;
     F->box_rect = F->box_bar = -1;
+    F->fl_mark = F->fl_base = fl_n;
 }
 
 int doc_frame_pop(void) {
     doc_flush(0);
     if (F->box_rect >= 0) doc_box_end(0);
+    own_floats_close();
     int bottom = F->y;
     if (fn > 1) fn--;
     return bottom;
 }
 
+void doc_float_place(int w, int right, int *x, int *y) {
+    doc_flush(0);
+    take_pending();
+    int yy = F->y, l = doc_x(), r = l + doc_width();
+    for (int guard = 0; guard < 64; guard++) {
+        band(yy, 1, &l, &r);
+        int below = r - l < w ? float_below(yy, 1) : 0;
+        if (!below) break;
+        yy = below;                                   /* не влез рядом — ниже прежних плавающих */
+    }
+    int fx = right ? r - w : l;
+    if (fx < doc_x()) fx = doc_x();
+    *x = fx;
+    *y = yy;
+}
+
+void doc_float_add(int x, int y, int w, int h, int right) {
+    if (fl_n == FLOAT_MAX || w <= 0 || h <= 0) return;
+    fl[fl_n].x1 = x; fl[fl_n].x2 = x + w;
+    fl[fl_n].top = y; fl[fl_n].bottom = y + h;
+    fl[fl_n].right = (uint8_t)(right != 0);
+    fl_n++;
+}
+
+int doc_float_mark(void) { return fl_n; }
+
+void doc_float_clear(int mark, int side) {
+    doc_flush(0);
+    int b = 0;
+    /* только плавающие своего «контекста» (fl_base): соседняя колонка-плавающий clear не касается */
+    for (int i = mark > F->fl_base ? mark : F->fl_base; i < fl_n; i++)
+        if ((side & (fl[i].right ? 2 : 1)) && fl[i].bottom > b) b = fl[i].bottom;
+    if (b > F->y + F->pending) { F->y = b; F->pending = 0; }
+}
+
 void doc_measure_push(void) {
     doc_flush(0);
     if (mn == MAX_FRAMES) return;
-    ms[mn].min = ms[mn].max = 0;
+    ms[mn].min = ms[mn].max = ms[mn].frun = 0;
     mn++;
 }
 
@@ -321,6 +544,14 @@ void doc_measure_pop(int *min_w, int *max_w) {
     mn--;
     *min_w = ms[mn].min;
     *max_w = ms[mn].max;
+}
+
+/* Плавающий при измерении: плавающие подряд встают в ряд — наибольшая ширина — их сумма,
+ * наименьшая — самый широкий из них (остальные уйдут ниже). */
+void doc_measure_float(int min_w, int max_w) {
+    if (!mn) return;
+    ms[mn - 1].frun += max_w;
+    doc_measure_add(min_w, ms[mn - 1].frun);
 }
 
 void doc_measure_add(int min_w, int max_w) {

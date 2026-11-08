@@ -34,6 +34,7 @@
 #include "gif.h"
 #include "svg.h"
 #include "imgcache.h"
+#include "css.h"
 #include <math.h>
 #include "src/webp/decode.h"
 extern int VDAC4WebPRingOff;             /* libwebp (правка VDAC4): 1 — точки VP8L без кольца строк */
@@ -1025,7 +1026,8 @@ static int drop_caches(int keep_gi, int all) {
 static int free_for_job(job_t *j) {
     while (j->retried < 3) {
         int step = j->retried++;
-        if (step == 0 ? imgcache_trim() : drop_caches(j->gi, step == 2)) return 1;
+        /* шаг 0 — очередь записи на карту и таблицы стилей в памяти (css.h): они вернутся с карты */
+        if (step == 0 ? (imgcache_trim() | css_mem_trim()) : drop_caches(j->gi, step == 2)) return 1;
     }
     return 0;
 }
@@ -1420,5 +1422,28 @@ void image_host_stats(int top, int *seen, int *ready, int *failed, uint32_t *use
                     imgs[p->img].body != NULL, job.state);
     }
     for (unsigned i = 0; i < img_n; i++) *used += imgs[i].bytes;
+}
+
+int image_host_size(const char *tail, int *w, int *h) {
+    size_t tl = strlen(tail);
+    for (unsigned k = 0; k < place_n; k++) {
+        const char *u = str(imgs[places[k].img].url);
+        size_t ul = strlen(u);
+        if (ul >= tl && !strcmp(u + ul - tl, tail)) { *w = places[k].w; *h = places[k].h; return 1; }
+    }
+    return 0;
+}
+
+int image_host_rect(const char *tail, int *x, int *y, int *w, int *h) {
+    size_t tl = strlen(tail);
+    for (unsigned k = 0; k < place_n; k++) {
+        const char *u = str(imgs[places[k].img].url);
+        size_t ul = strlen(u);
+        if (ul >= tl && !strcmp(u + ul - tl, tail)) {
+            *x = places[k].x; *y = places[k].y; *w = places[k].w; *h = places[k].h;
+            return 1;
+        }
+    }
+    return 0;
 }
 #endif

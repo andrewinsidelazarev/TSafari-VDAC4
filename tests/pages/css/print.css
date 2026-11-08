@@ -1,0 +1,2 @@
+/* media=print — для экрана не действует (стенд «алфавит CSS»). */
+.print-bad { color: red !important; font-weight: bold !important; }

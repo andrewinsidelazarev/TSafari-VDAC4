@@ -221,11 +221,12 @@ class CacheEsp(Esp):
         return super().__call__(c, p)
 
 
-def cache_files(disk):
-    """Файлы Cache\\Images в папке программы (/PROGRAMS/WEB, кластер 7): {имя: содержимое}."""
+def cache_files(disk, folder="Images"):
+    """Файлы Cache\\Images (или Cache\\CSS) в папке программы (/PROGRAMS/WEB, кластер 7):
+    {имя: содержимое}."""
     cache = disk.get("Cache", 7)["cluster"]
-    images = disk.get("Images", cache)["cluster"]
-    return {e["name"]: disk.contents(e["name"], images) for e in disk.entries(images) if not e["attr"] & 0x10}
+    sub = disk.get(folder, cache)["cluster"]
+    return {e["name"]: disk.contents(e["name"], sub) for e in disk.entries(sub) if not e["attr"] & 0x10}
 
 
 def saved(disk, date, name):
@@ -520,6 +521,27 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(r[4][4], a)
         self.assertEqual({n for n, *_ in r[6][4] if n.endswith(".IMG")}, {"1ABCDEFG.IMG"})
         self.assertEqual(cache_files(disk), {"1ABCDEFG.IMG": b})
+        disk.assert_mirrors()
+
+    def test_css_cache_in_own_folder(self):
+        """Таблицы стилей (имя «.CSS») — в Cache\\CSS, картинки — в Cache\\Images: список «.CSS» —
+        только таблицы, запись и чтение байт в байт, удаление — из своей папки."""
+        css = b".a{color:red}" * 40
+        img = bytes(range(256)) * 3
+        ops = [(1, b"", None), (1, b".CSS", None), (3, b"7ABCDEFG.CSS", css), (3, b"0K3F9QAB.IMG", img),
+               (1, b".CSS", None), (1, b"", None), (2, b"7ABCDEFG.CSS", None), (4, b"7ABCDEFG.CSS", None),
+               (1, b".CSS", None)]
+        esp = CacheEsp(ops)
+        disk = disk_image()
+        Machine(disk, esp).run()
+        r = esp.results
+        self.assertEqual([x[2] for x in r], [0] * 9, r)
+        self.assertEqual({n: s for n, s, *_ in r[4][4] if not n.startswith(".")}, {"7ABCDEFG.CSS": len(css)})
+        self.assertEqual({n for n, *_ in r[5][4] if not n.startswith(".")}, {"0K3F9QAB.IMG"})
+        self.assertEqual(r[6][4], css)
+        self.assertEqual({n for n, *_ in r[8][4] if not n.startswith(".")}, set())
+        self.assertEqual(cache_files(disk), {"0K3F9QAB.IMG": img})
+        self.assertEqual(cache_files(disk, "CSS"), {})
         disk.assert_mirrors()
 
     def test_image_cache_big_file_and_stop(self):

@@ -31,6 +31,7 @@
 #include "imgcache.h"
 #include "charset.h"
 #include "html.h"
+#include "css.h"
 #include "form.h"
 #include "image.h"
 #include "url.h"
@@ -169,6 +170,14 @@ static int img_rewrite;                  /* точки с карты не под
 static int ram_big;                      /* RAM_G переключена в 3 МБ (вернуть 2 МБ при выходе) */
 static char img_url[URL_MAX];
 static uint32_t relayout_at;             /* когда разложить страницу заново; 0 — не нужно */
+/* Внешние таблицы стилей страницы (css.h): адреса копит разбор страницы, грузятся они по одной,
+ * когда страница уже на экране, — раньше картинок (от CSS зависят размеры и видимость картинок).
+ * Пришли все — страница раскладывается заново, и только потом грузятся картинки. */
+static int css_busy;                     /* грузится таблица стилей css_url */
+static int css_card;                     /* … с карты Evo (Cache\CSS, imgcache.h), а не из сети */
+static uint32_t css_began;               /* когда начата — время в журнал */
+static int css_relayout;                 /* таблицы пришли, раскладка с ними ещё впереди */
+static char css_url[URL_MAX];
 static uint8_t *page_body;               /* тело страницы на экране (для переразметки) */
 static size_t page_len;
 static char page_ct[96];
@@ -182,6 +191,8 @@ static void img_drop(void) {
 /* Загрузить адрес как страницу; картинка, если грузилась, — брошена. */
 static void net_go(const char *url) {
     img_drop();
+    if (css_busy && css_card) imgcache_read_cancel();
+    css_busy = css_card = css_relayout = 0;      /* таблицу стилей, если грузилась, бросает новая загрузка */
     relayout_at = 0;
     fetch_start(url);
 }
@@ -278,11 +289,26 @@ static int is_visited(const char *url) {
 /* Новая страница на экране: верх, кольцо целиком. */
 static int show_new_page(void);
 
+/* Таблица стилей css_url пришла (b = NULL — не вышло): разобрать в правила (css.c), в журнал —
+ * откуда и за сколько; все таблицы страницы здесь — разложить её заново. */
+static void css_arrived(const uint8_t *b, size_t n, const char *from) {
+    uint32_t t0 = ts_core->millis();
+    css_link_done(css_url, b, n);
+    ts_log("tsafari: css %s: %s, %u bytes in %u ms, parse %u ms, %d rules", css_url, from, (unsigned)n,
+           (unsigned)(t0 - css_began), (unsigned)(ts_core->millis() - t0), css_rules(1));
+    if (!css_links_wanted()) {
+        css_relayout = 1;
+        relayout_at = ts_core->millis() + 1;
+    }
+}
+
 /* Картинка по ссылке (тип image/…) — страница из одной этой картинки, как у браузеров: HTML
  * «<img src=адрес>» по середине, имя файла — в заголовке. Сами байты картинки — сразу ей
  * (image_loaded), второй раз из сети не идут; из сети — и в кэш на карте, как картинки страниц.
  * Страница (page_body) — этот HTML: по нему раскладка заново, когда станет известен размер. */
 static int show_image_page(const fetch_result_t *r) {
+    css_links_clear();
+    html_data_clear();
     const char *name = strrchr(r->url, '/');
     name = name && name[1] ? name + 1 : r->url;
     size_t cap = 2 * strlen(r->url) + strlen(name) + 160, n = 0;
@@ -381,6 +407,11 @@ static int open_url(const char *url, int push) {
         ui_set_busy(0);
         frames_clear();
         img_drop();
+        if (css_busy && css_card) imgcache_read_cancel();
+        else if (css_busy) fetch_cancel();
+        css_busy = css_card = 0;
+        css_relayout = 0;
+        css_links_clear();
         relayout_at = 0;
         image_clear();
         image_layout_begin();
@@ -430,6 +461,8 @@ static int frames_next(void) {
     snprintf(shown_url, sizeof(shown_url), "%s", current);
     uint32_t t0 = ts_core->millis();
     image_clear();
+    css_links_clear();                           /* новый набор фреймов — таблицы стилей заново */
+    html_data_clear();
     render_frames();
     ts_log("tsafari: %s: %d frames, layout %u ms, %d px", current, fr_n, (unsigned)(ts_core->millis() - t0), page_height());
     target = 0;
@@ -543,6 +576,8 @@ static int submit_form(form_submit_t *s) {
         loading = 1;
         ui_set_busy(1);
         img_drop();
+        if (css_busy && css_card) imgcache_read_cancel();
+        css_busy = css_card = 0;
         relayout_at = 0;
         fetch_post(s->url, s->body, s->body_len);
     }
@@ -600,6 +635,19 @@ static int fetch_step(void) {
     fetch_result_t *r = NULL;
     int st = fetch_poll(&r);
     if (st == FETCH_BUSY || st == FETCH_IDLE || !r) return 1;
+    if (css_busy) {                              /* таблица стилей из сети: разобрать в правила (css.c) */
+        css_busy = 0;
+        if (!loading && !img_busy) ui_set_busy(0);
+        int ok_css = st == FETCH_DONE && !r->error[0] && r->length;
+        size_t n = ok_css ? r->length : 0;
+        uint8_t *b = ok_css ? fetch_take_body() : NULL;   /* тело — себе: в память и на карту */
+        css_arrived(b ? b : ok_css ? r->body : NULL, n, ok_css ? "network" : st == FETCH_CANCELLED ? "stopped" : "failed");
+        if (b) {
+            imgcache_css_store(css_url, b, n, img_fresh);   /* на карту — копией, в очередь записи */
+            css_mem_put(css_url, b, n);                      /* в память — сам буфер */
+        }
+        return 1;
+    }
     if (img_busy) {                              /* это была картинка: в память видеочипа */
         img_busy = 0;
         if (!loading) ui_set_busy(0);
@@ -656,6 +704,8 @@ static int fetch_step(void) {
     internal_page = 0;
     frames_clear();
     if (st != FETCH_FAILED && !strncmp(r->content_type, "image/", 6)) return show_image_page(r);
+    css_links_clear();                           /* новая страница — её таблицы стилей соберёт разбор */
+    html_data_clear();                           /* и её картинки data: */
     if (st == FETCH_FAILED) {
         html_error_page(r->url, "Cannot open the page", r->error);
     } else {
@@ -679,9 +729,27 @@ static int relayout(void) {
     int top = page_top();
     if (internal_page) return 1;
     form_save();
+    uint32_t t0 = ts_core->millis();
+#ifdef TSAFARI_HOST
+    {
+        extern size_t html_host_parsed;
+        html_host_parsed = 0;
+    }
+#endif
     if (fr_n) render_frames();
     else if (page_body) html_render(page_body, page_len, page_ct, shown_url);
     else { form_restore(); return 1; }
+    /* долгая раскладка — в журнал (короткие — нет: журнал пишется во флеш, раскладка заново — на
+     * каждую пришедшую картинку) */
+    uint32_t took = ts_core->millis() - t0;
+    if (took >= 300) ts_log("tsafari: relayout %u ms, %d px", (unsigned)took, page_height());
+#ifdef TSAFARI_HOST
+    {
+        extern size_t html_host_parsed;
+        printf("    relayout: parse %u KB for a %u KB page\n", (unsigned)(html_host_parsed / 1024u), (unsigned)(page_len / 1024u));
+        html_host_parsed = 0;
+    }
+#endif
     form_restore();
     target = top;
     clamp_target(&target);
@@ -836,6 +904,15 @@ static int browser_step(uint32_t now) {
             image_loaded(img_url, NULL, 0, 0);
             image_stop();
         } else if (img_busy) { fetch_cancel(); image_stop(); }
+        else if (css_busy && css_card) {                /* таблица с карты: бросить, остальные — не грузить */
+            imgcache_read_cancel();
+            css_busy = css_card = 0;
+            css_links_stop();
+            image_stop();
+            if (!loading) ui_set_busy(0);
+            css_relayout = 1;
+            relayout_at = ts_core->millis() + 1;
+        } else if (css_busy) { fetch_cancel(); css_links_stop(); image_stop(); }   /* итог «отменена» — в fetch_step */
         else if (download_busy()) download_cancel();   /* Esc при записи файла — отмена */
     } else if (act == UI_DL_CANCEL) {                  /* крестик индикатора */
         if (loading && net_file) fetch_cancel();
@@ -885,10 +962,49 @@ static int browser_step(uint32_t now) {
     }
     /* фоновая задача разобрала GIF, WebP или SVG — точки в видеочип (image.c) */
     if (ok && image_poll() && !relayout_at) relayout_at = ts_core->millis() + 700;
-    /* картинки страницы — по одной, когда страница уже на экране (сначала видимые) */
-    if (ok && !loading && !nx_loading && !img_busy && !ui_wifi_open()) {
+    /* таблица стилей с карты Evo (Cache\CSS) */
+    if (ok && css_busy && css_card) {
+        uint8_t *b = NULL;
+        size_t n = 0;
+        int kind = IMGCACHE_CSS;
+        int r = imgcache_read_poll(&b, &n, &kind);
+        if (r > 0) {
+            css_busy = css_card = 0;
+            if (!loading && !img_busy) ui_set_busy(0);
+            css_arrived(b, n, "Evo SD");
+            css_mem_put(css_url, b, n);
+        } else if (r < 0) {                      /* с карты не вышло — из сети */
+            css_card = 0;
+            fetch_start_image(css_url);
+        }
+    }
+    /* внешние таблицы стилей — по одной, раньше картинок: из памяти (сразу), с карты или из сети;
+     * «обновить» (F5) — из сети, и в память и на карту заново */
+    while (ok && !loading && !nx_loading && !img_busy && !css_busy && !ui_wifi_open()) {
+        const char *u = css_link_next();
+        if (!u) break;
+        snprintf(css_url, sizeof(css_url), "%s", u);
+        css_began = ts_core->millis();
+        size_t n = 0;
+        const uint8_t *m = img_fresh ? NULL : css_mem_get(css_url, &n);
+        if (m) {
+            css_arrived(m, n, "memory");
+            continue;                            /* следующая — тоже, может быть, в памяти */
+        }
+        css_busy = 1;
+        ui_set_busy(1);
+        css_card = !img_fresh && imgcache_css_read_start(css_url);
+        if (!css_card) fetch_start_image(css_url);   /* как картинка: тело — в память, не файлом на карту */
+    }
+    /* картинки страницы — по одной, когда страница уже на экране (сначала видимые) и её таблицы
+     * стилей пришли и разложены */
+    if (ok && !loading && !nx_loading && !img_busy && !css_busy && !css_relayout && !css_links_wanted() && !ui_wifi_open()) {
         const char *u = image_next(page_top());
-        if (u) {
+        if (u && !strncmp(u, "data:", 5)) {      /* картинка data: — байты уже в странице (html.c) */
+            size_t dn = 0;
+            uint8_t *d = html_data_copy(u, &dn);
+            if (image_loaded(u, d, d ? dn : 0, 3) && !relayout_at) relayout_at = ts_core->millis() + 700;
+        } else if (u) {
             snprintf(img_url, sizeof(img_url), "%s", u);
             img_busy = 1;
             img_rewrite = 0;
@@ -901,6 +1017,7 @@ static int browser_step(uint32_t now) {
     int relaid = 0;
     if (ok && relayout_at && (int32_t)(now - relayout_at) >= 0 && !loading && !nx_loading) {
         relayout_at = 0;
+        css_relayout = 0;
         ok = relayout();
         relaid = 1;
     }

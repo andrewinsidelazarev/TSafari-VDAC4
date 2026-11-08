@@ -169,6 +169,7 @@ static const char *pages_dir = "tests/pages";
 static char last_get[600], last_post[2000];   /* что дошло до «сервера» последним */
 static int moved_old, moved_new;              /* картинка страницы переадресации: просили с old/ и с new/ */
 static int net_images;                        /* сколько раз картинку брали из сети (не .html) */
+static int net_css;                           /* сколько раз таблицу стилей брали из сети */
 static void *c_net_open(const char *url, const char *extra, uint32_t t, int *status) {
     (void)extra; (void)t;
     const char *host = "https://test.local/";
@@ -191,7 +192,8 @@ static void *c_net_open(const char *url, const char *extra, uint32_t t, int *sta
      * спрошенная по набранному адресу, — 404. */
     char final[600];
     snprintf(final, sizeof(final), "%s", url);
-    if (!strstr(url, ".htm")) net_images++;
+    if (!strstr(url, ".htm") && !strstr(url, ".css")) net_images++;
+    if (strstr(url, ".css")) net_css++;
     if (!strncmp(url + strlen(host), "old/", 4)) {
         if (strstr(url, ".png")) moved_old++;
         if (!strstr(url, ".html")) { *status = 404; return NULL; }
@@ -213,7 +215,7 @@ static void *c_net_open(const char *url, const char *extra, uint32_t t, int *sta
                      strstr(path, ".nolen") ? "application/octet-stream" :
                      strstr(path, ".webp") ? "image/webp" : strstr(path, ".png") ? "image/png" :
                      strstr(path, ".jpg") || strstr(path, ".jpeg") ? "image/jpeg" : strstr(path, ".gif") ? "image/gif" :
-                     strstr(path, ".svg") ? "image/svg+xml" : "text/html");
+                     strstr(path, ".svg") ? "image/svg+xml" : strstr(path, ".css") ? "text/css" : "text/html");
     /* «.nolen» — сервер не говорит длину (тогда загрузка кончается ответом «конец файла») */
     if (!strstr(path, ".nolen")) snprintf(s->clen, sizeof(s->clen), "%u", (unsigned)s->len);
     snprintf(s->final, sizeof(s->final), "%s", final);
@@ -395,7 +397,13 @@ static void z80_download(void) {
  * чтение, запись или удаление файла в папке card_dir (по умолчанию <out>/../card/Cache/Images).
  * За шаг 10 мс — 4 куска чтения по 1016 байт или 8 кусков записи по 246 (~400 и ~200 КБ/с). --- */
 static struct { int on, op; uint16_t seq; uint32_t size, at; char name[24]; uint8_t *buf; } zc;
-static char card_dir[600];
+static char card_dir[600], css_dir[600];
+/* Папка файла кэша, как у программы Z80 (imgcache.asm, CacheIsCss): «.CSS», «XXXXXXXX.CSS» и
+ * «XXXXXXXX.CSS.$$$» — Cache/CSS, остальные — Cache/Images. */
+static const char *zc_dir(const char *name) {
+    const char *dot = strchr(name, '.');
+    return dot && !strncmp(dot, ".CSS", 4) && (!dot[4] || dot[4] == '.') ? css_dir : card_dir;
+}
 static uint16_t rd16h(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static void zc_report(int result, int code) {
     uint8_t q[14] = {(uint8_t)zc.seq, (uint8_t)(zc.seq >> 8), (uint8_t)result, (uint8_t)code};
@@ -405,7 +413,7 @@ static void zc_report(int result, int code) {
 }
 static void zc_list(void) {
     char pat[640];
-    snprintf(pat, sizeof(pat), "%s/*", card_dir);
+    snprintf(pat, sizeof(pat), "%s/*", zc_dir(zc.name));
     uint8_t f[1024];
     unsigned fill = 2;
     f[0] = (uint8_t)zc.seq; f[1] = (uint8_t)(zc.seq >> 8);
@@ -444,11 +452,11 @@ static void z80_cache(void) {
         ev8_pending = 0;
         zc.on = 1; zc.op = ev8_buf[0]; zc.seq = rd16h(ev8_buf + 1); zc.size = rd32(ev8_buf + 3); zc.at = 0;
         snprintf(zc.name, sizeof(zc.name), "%s", (const char *)ev8_buf + 7);
-        snprintf(path, sizeof(path), "%s/%s", card_dir, zc.name);
+        snprintf(path, sizeof(path), "%s/%s", zc_dir(zc.name), zc.name);
         zc_report(3, 0);                              /* «принято, начинаю» */
         if (zc.op == 1) {
             char cmd[700];
-            snprintf(cmd, sizeof(cmd), "mkdir \"%s\" 2>nul", card_dir);
+            snprintf(cmd, sizeof(cmd), "mkdir \"%s\" 2>nul", zc_dir(zc.name));
             for (char *c = cmd; *c; c++) if (*c == '/') *c = '\\';
             system(cmd);
             zc_list();
@@ -498,7 +506,7 @@ static void z80_cache(void) {
             zc.at += count;
         }
         if (zc.at < zc.size) return;
-        snprintf(path, sizeof(path), "%s/%s", card_dir, zc.name);
+        snprintf(path, sizeof(path), "%s/%s", zc_dir(zc.name), zc.name);
         FILE *o = fopen(path, "wb");
         if (!o) { zc_report(1, 0xFF); return; }
         fwrite(zc.buf, 1, zc.size, o);
@@ -576,6 +584,8 @@ static int run(unsigned ms) {
 int form_host_rect(int id, int *x, int *y, int *w, int *h);
 int page_top(void);
 void image_host_stats(int top, int *seen, int *ready, int *failed, uint32_t *used);
+int image_host_size(const char *tail, int *w, int *h);
+int image_host_rect(const char *tail, int *x, int *y, int *w, int *h);
 
 /* Сводка картинок видимой части — строкой в вывод стенда. */
 static void image_stats_line(const char *name) {
@@ -657,6 +667,13 @@ int main(int argc, char **argv) {
     /* «карта» кэша картинок: TSAFARI_CARD или рядом со снимками; TSAFARI_CACHE_MAX — предел */
     if (getenv("TSAFARI_CARD")) snprintf(card_dir, sizeof(card_dir), "%s", getenv("TSAFARI_CARD"));
     else snprintf(card_dir, sizeof(card_dir), "%s/../card/Cache/Images", out_dir);
+    {                                                 /* Cache/CSS — рядом с Cache/Images */
+        snprintf(css_dir, sizeof(css_dir), "%s", card_dir);
+        char *sl = strrchr(css_dir, '/'), *bs = strrchr(css_dir, '\\');
+        if (bs > sl) sl = bs;
+        if (sl) snprintf(sl + 1, sizeof(css_dir) - (size_t)(sl + 1 - css_dir), "CSS");
+        else snprintf(css_dir, sizeof(css_dir), "CSS");
+    }
     if (getenv("TSAFARI_CACHE_MAX")) imgcache_host_limit((uint32_t)atol(getenv("TSAFARI_CACHE_MAX")));
     if (!tsafari_host_init(&core)) { printf("init failed, state %d\n", tsafari_host_state()); return 1; }
     if (!stream_ring_test()) { printf("stream ring test failed\n"); return 5; }
@@ -684,7 +701,7 @@ int main(int argc, char **argv) {
             key_press(0x7A, 1);                           /* PgDn */
             ok &= run(1200);
             snprintf(name, sizeof(name), "p%d", k);
-            if (k <= 6) snapshot(name);
+            if (k <= 6 || getenv("TSAFARI_SNAPALL")) snapshot(name);
             image_stats_line(name);
         }
         /* TSAFARI_IDLE — столько мс ничего не трогать: картинки должны успокоиться (на плате 07.11
@@ -790,6 +807,63 @@ int main(int argc, char **argv) {
     ok &= run(900);   snapshot("13b_styles");
     key_press(0x7A, 1);                               /* PgDn */
     ok &= run(900);   snapshot("13c_styles_pgdn");
+    /* «алфавит CSS» (07.11): внешние таблицы (link, @import, media), селекторы, вес, !important,
+     * var(), calc(), @media, @supports, цвета, регистр, маркеры, коробки, скрытое; флажок —
+     * картинка 100% в <span> 20 × calc(20px * 0.75) */
+    key_press(0x1F, 1);
+    ok &= run(300);
+    type_text("test.local/css.html");
+    key_press(0x5A, 0);
+    ok &= run(1500);  snapshot("13d_css");
+    {
+        int fw = 0, fh = 0;
+        if (!image_host_size("css/flag.svg", &fw, &fh) || fw != 20 || fh != 15) {
+            printf("css flag %dx%d, want 20x15\n", fw, fh);
+            ok = 0;
+        } else {
+            puts("css flag 20x15 ok");
+        }
+        /* position: absolute: угол коробки 320 × 160 (left 0, top 0) — её начало; флаг 80 × 60 —
+         * left и top 50 % минус translate(-50 %) своего размера: на 120 и 50 от угла */
+        int cx = 0, cy = 0, cw = 0, ch = 0, mx = 0, my = 0, mw = 0, mh = 0, aw = 0, ah = 0;
+        image_host_rect("css/corner.svg", &cx, &cy, &cw, &ch);
+        image_host_rect("css/badge.svg", &mx, &my, &mw, &mh);
+        image_host_size("css/nothing.png", &aw, &ah);
+        if (mw != 80 || mh != 60 || mx - cx != 120 || my - cy != 50 || aw != 200 || ah != 50) {
+            printf("css absolute: corner %d,%d; flag %d,%d %dx%d (want +120,+50 80x60); aspect %dx%d (want 200x50)\n", cx, cy,
+                   mx, my, mw, mh, aw, ah);
+            ok = 0;
+        } else {
+            puts("css absolute ok");
+        }
+    }
+    key_press(0x7A, 1);
+    ok &= run(900);   snapshot("13e_css_pgdn");
+    key_press(0x7A, 1);
+    ok &= run(900);   snapshot("13f_css_pgdn2");
+    /* та же страница ещё раз: таблицы стилей — из памяти (css_mem), в сеть — ни одной; и они уже
+     * на карте, в своей папке Cache/CSS */
+    {
+        int was = net_css;
+        key_press(0x1F, 1);
+        ok &= run(300);
+        type_text("test.local/css.html");
+        key_press(0x5A, 0);
+        ok &= run(1500);
+        int fw = 0, fh = 0, files = 0;
+        char pat[640];
+        snprintf(pat, sizeof(pat), "%s/*.CSS", css_dir);
+        struct _finddata_t fd;
+        intptr_t h = _findfirst(pat, &fd);
+        for (int more = h != -1; more; more = _findnext(h, &fd) == 0) files++;
+        if (h != -1) _findclose(h);
+        if (net_css != was || !files || !image_host_size("css/flag.svg", &fw, &fh) || fw != 20 || fh != 15) {
+            printf("css again: %d style sheets from network (want 0), %d on card, flag %dx%d\n", net_css - was, files, fw, fh);
+            ok = 0;
+        } else {
+            printf("css again from memory ok, %d style sheets on card\n", files);
+        }
+    }
     /* формы: поле (набор и Enter — GET), флажок, переключатель, список, многострочное поле,
      * кнопка (POST по HTTP через сокет), POST по HTTPS — ошибка с объяснением */
     key_press(0x1F, 1);

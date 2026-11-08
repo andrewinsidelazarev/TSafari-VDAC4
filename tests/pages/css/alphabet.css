@@ -1,0 +1,10 @@
+@charset "utf-8";
+/* Внешняя таблица стилей страницы css.html (стенд «алфавит CSS»). */
+@import url("import.css");
+@font-face { font-family: Test; src: url(test.woff2); }
+@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+.ext-ok { color: #0a7d32; font-weight: 700; }
+.print-bad { font-weight: normal; }
+/* правило с состоянием мыши — пропускается целиком, не портит остальное */
+.ext-ok:hover { color: red; }
+.unused-class-not-in-page { color: red; }

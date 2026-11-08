@@ -14,7 +14,12 @@
  * большого. Кольцо: пока новый файл не влезает в предел, удаляется файл с самым малым order.
  *
  * ФАЙЛ КЭША: «TSIC», версия 1, вид (IMGCACHE_FILE — файл картинки, IMGCACHE_PIX — точки экрана со
- * своим заголовком от image.c), длина адреса LE16, длина содержимого LE32, адрес, содержимое.
+ * своим заголовком от image.c, IMGCACHE_CSS — таблица стилей), длина адреса LE16, длина
+ * содержимого LE32, адрес, содержимое.
+ *
+ * ДВЕ ПАПКИ. Картинки — Cache\Images («XXXXXXXX.IMG»), таблицы стилей — Cache\CSS («XXXXXXXX.CSS»):
+ * папку выбирает программа Z80 по имени файла; список папки CSS — событие «список» с именем «.CSS».
+ * В учёте у файла — признак css; кольцо и предел 100 МБ — общие.
  *
  * ЧТЕНИЕ ВАЖНЕЕ ЗАПИСИ. Картинка нужна сейчас, а запись — только следующим заходам: если кэш
  * занят записью, она прерывается (на следующий кусок 76 — ответ «хватит»; программа Z80 закроет
@@ -46,13 +51,14 @@
 enum { OP_LIST = 1, OP_READ = 2, OP_WRITE = 3, OP_DELETE = 4 };
 enum { ST_IDLE, ST_DUE, ST_SENT, ST_RUN, ST_OK, ST_FAILED };
 
-/* Файл кэша: свёртка адреса (из неё — имя), размер, «время» для кольца (меньше — старше). */
-typedef struct { uint8_t key[5]; uint32_t size, order; } entry_t;
+/* Файл кэша: свёртка адреса (из неё — имя), таблица ли стилей, размер, «время» для кольца
+ * (меньше — старше). */
+typedef struct { uint8_t key[5], css; uint32_t size, order; } entry_t;
 /* Картинка в очереди на запись: заголовок с адресом (head) и файл картинки (body) — свой буфер
  * кэша, без копии, если картинка его не хранит (imgcache_give). len — весь файл кэша. */
 typedef struct wjob {
     struct wjob *next;
-    uint8_t key[5];
+    uint8_t key[5], css;
     int again;
     uint8_t *head, *body;
     uint32_t head_len, len;
@@ -71,6 +77,8 @@ static uint32_t total;                   /* сумма размеров файл
 static uint32_t top_order;               /* самое новое «время» */
 static uint32_t limit = LIMIT_DEFAULT;
 static int ready;                        /* список с карты получен */
+static int list_css;                     /* список картинок есть — пора список таблиц стилей */
+static int css_off;                      /* папки таблиц стилей нет (ошибка её списка) */
 static int off;                          /* кэша нет: программа Z80 его не знает или карта отказала */
 static wjob_t *queue;                    /* очередь записи (только задача браузера) */
 static uint32_t queued;
@@ -84,7 +92,7 @@ static char *read_url;                   /* адрес читаемой карт
 static struct {
     int kind, st, tries, cancel;
     uint16_t seq;
-    uint8_t key[5];
+    uint8_t key[5], css;                 /* свёртка адреса файла; таблица ли стилей */
     char name[20];                       /* имя файла на карте */
     uint8_t *data;                       /* запись: файл картинки (после head); чтение: принятое */
     uint8_t *head;                       /* запись: заголовок с адресом — начало файла */
@@ -103,7 +111,7 @@ static struct {
 /* Чтение, которое ждёт конца текущей операции (её прервали ради него). */
 static struct {
     int on;
-    uint8_t key[5];
+    uint8_t key[5], css;
     char name[20];
     uint32_t size;
     uint8_t *buf;
@@ -135,17 +143,20 @@ static unsigned key_bits(const uint8_t key[5], unsigned b) {
     return (w >> (b % 8)) & 31u;
 }
 
-/* Имя файла: 8 знаков свёртки (старшие биты — первыми) и «.IMG». */
-static void key_name(const uint8_t key[5], char *out) {
+/* Имя файла: 8 знаков свёртки (старшие биты — первыми) и «.IMG» (таблица стилей — «.CSS»). */
+static void key_name(const uint8_t key[5], int css, char *out) {
     for (int j = 0; j < 8; j++) out[j] = B32[key_bits(key, (unsigned)(5 * (7 - j)))];
-    memcpy(out + 8, ".IMG", 5);
+    memcpy(out + 8, css ? ".CSS" : ".IMG", 5);
 }
 
 static int upper(int c) { return c >= 'a' && c <= 'z' ? c - 32 : c; }
 
-/* «XXXXXXXX.IMG» (регистр не важен) → свёртка. 1 — имя наше. */
-static int name_key(const char *s, size_t n, uint8_t key[5]) {
-    if (n != 12 || s[8] != '.' || upper(s[9]) != 'I' || upper(s[10]) != 'M' || upper(s[11]) != 'G') return 0;
+/* «XXXXXXXX.IMG» или «XXXXXXXX.CSS» (регистр не важен) → свёртка и *css. 1 — имя наше. */
+static int name_key(const char *s, size_t n, uint8_t key[5], uint8_t *css) {
+    if (n != 12 || s[8] != '.') return 0;
+    if (upper(s[9]) == 'I' && upper(s[10]) == 'M' && upper(s[11]) == 'G') *css = 0;
+    else if (upper(s[9]) == 'C' && upper(s[10]) == 'S' && upper(s[11]) == 'S') *css = 1;
+    else return 0;
     memset(key, 0, 5);
     for (int j = 0; j < 8; j++) {
         const char *d = strchr(B32, upper(s[j]));
@@ -157,17 +168,17 @@ static int name_key(const char *s, size_t n, uint8_t key[5]) {
     return 1;
 }
 
-/* «XXXXXXXX.IMG.$$$» — недописанный файл (запись оборвалась): удалить. */
+/* «XXXXXXXX.IMG.$$$» («.CSS.$$$») — недописанный файл (запись оборвалась): удалить. */
 static int name_junk(const char *s, size_t n) {
-    uint8_t k[5];
-    return n == 16 && !memcmp(s + 12, ".$$$", 4) && name_key(s, 12, k);
+    uint8_t k[5], c;
+    return n == 16 && !memcmp(s + 12, ".$$$", 4) && name_key(s, 12, k, &c);
 }
 
 /* --- учёт --- */
 
-static int find_key(const uint8_t key[5]) {
+static int find_key(const uint8_t key[5], int css) {
     for (unsigned i = 0; i < ent_n; i++)
-        if (!memcmp(ents[i].key, key, 5)) return (int)i;
+        if (!memcmp(ents[i].key, key, 5) && ents[i].css == css) return (int)i;
     return -1;
 }
 
@@ -177,8 +188,8 @@ static void drop_entry(int i) {
 }
 
 /* Файл — в учёт (такой же — заменить). 0 — учёт полон или нет памяти. */
-static int add_entry(const uint8_t key[5], uint32_t size, uint32_t order) {
-    int i = find_key(key);
+static int add_entry(const uint8_t key[5], int css, uint32_t size, uint32_t order) {
+    int i = find_key(key, css);
     if (i >= 0) drop_entry(i);
     if (ent_n == ent_cap) {
         if (ent_cap >= ENTRIES_MAX) return 0;
@@ -190,6 +201,7 @@ static int add_entry(const uint8_t key[5], uint32_t size, uint32_t order) {
         ent_cap = cap;
     }
     memcpy(ents[ent_n].key, key, 5);
+    ents[ent_n].css = (uint8_t)css;
     ents[ent_n].size = size;
     ents[ent_n].order = order;
     ent_n++;
@@ -198,11 +210,12 @@ static int add_entry(const uint8_t key[5], uint32_t size, uint32_t order) {
     return 1;
 }
 
-/* Самый старый файл, кроме key (его как раз пишем заново). −1 — нет. */
-static int oldest(const uint8_t key[5]) {
+/* Самый старый файл, кроме key/css (его как раз пишем заново). −1 — нет. */
+static int oldest(const uint8_t key[5], int css) {
     int best = -1;
     for (unsigned i = 0; i < ent_n; i++)
-        if (memcmp(ents[i].key, key, 5) && (best < 0 || ents[i].order < ents[best].order)) best = (int)i;
+        if ((memcmp(ents[i].key, key, 5) || ents[i].css != css) && (best < 0 || ents[i].order < ents[best].order))
+            best = (int)i;
     return best;
 }
 
@@ -232,7 +245,7 @@ int imgcache_busy(void) {
 
 void imgcache_init(void) {
     if (!mutex) mutex = ts_core->mutex_create();
-    ready = off = 0;
+    ready = off = list_css = css_off = 0;
     ent_n = 0;
     total = top_order = 0;
     junk_n = 0;
@@ -245,17 +258,23 @@ void imgcache_init(void) {
  * сюда не попадает — его забирает imgcache_read_poll (кроме брошенного). */
 static void op_finish(void) {
     int ok = op.st == ST_OK;
-    if (op.kind == OP_LIST) {
+    if (op.kind == OP_LIST && op.name[0]) {                  /* список таблиц стилей (Cache\CSS) */
+        unsigned css = 0;
+        for (unsigned i = 0; i < ent_n; i++) css += ents[i].css;
+        ready = 1;
+        if (!ok) css_off = 1;
+        ts_log("tsafari: image cache: %u files, %u KB (style sheets %u%s)", ent_n, (unsigned)(total / 1024u), css,
+               ok ? "" : ", no Cache\\CSS");
+    } else if (op.kind == OP_LIST) {
         if (ok) {
-            ready = 1;
-            ts_log("tsafari: image cache: %u files, %u KB", ent_n, (unsigned)(total / 1024u));
+            list_css = 1;                                     /* дальше — список Cache\CSS */
         } else {
             off = 1;
             ts_log("tsafari: image cache: no Cache\\Images on Evo SD (code %02X)", op.code);
         }
     } else if (op.kind == OP_WRITE) {
         if (ok) {
-            add_entry(op.key, op.size, op.order);
+            add_entry(op.key, op.css, op.size, op.order);
             writes++;
             /* скорость записи через программу Z80 на плате ещё не мерили — в журнал; только крупные:
              * журнал пишется во флеш, строка на каждый значок останавливала бы кэши ESP32 */
@@ -297,7 +316,7 @@ static void op_next(void) {
     }
     while (queue) {
         wjob_t *w = queue;
-        int i = find_key(w->key);
+        int i = find_key(w->key, w->css);
         if (i >= 0 && !w->again) {                            /* уже в кэше — не писать */
             queue = w->next;
             queued -= w->len;
@@ -312,18 +331,19 @@ static void op_next(void) {
         }
         uint32_t mine = i >= 0 ? ents[i].size : 0;            /* старый файл заменится новым */
         if (total - mine + w->len > limit || ent_n >= ENTRIES_MAX) {
-            int k = oldest(w->key);
+            int k = oldest(w->key, w->css);
             if (k >= 0) {                                     /* кольцо: самый старый — прочь */
-                key_name(ents[k].key, name);
+                key_name(ents[k].key, ents[k].css, name);
                 drop_entry(k);
                 op_begin(OP_DELETE, name, 0);
                 return;
             }
         }
         queue = w->next;
-        key_name(w->key, name);
+        key_name(w->key, w->css, name);
         op_begin(OP_WRITE, name, w->len);
         memcpy(op.key, w->key, 5);
+        op.css = w->css;
         op.head = w->head;
         op.head_len = w->head_len;
         op.data = w->body;
@@ -349,9 +369,14 @@ void imgcache_tick(uint32_t now) {
     }
     int done = (op.st == ST_OK || op.st == ST_FAILED) && (op.kind != OP_READ || op.cancel);
     if (done) op_finish();
+    if (op.st == ST_IDLE && list_css && !off) {               /* список картинок есть — теперь таблиц */
+        list_css = 0;
+        op_begin(OP_LIST, ".CSS", 0);
+    }
     if (op.st == ST_IDLE && pend.on && !off) {                /* чтение ждало конца прежней операции */
         op_begin(OP_READ, pend.name, pend.size);
         memcpy(op.key, pend.key, 5);
+        op.css = pend.css;
         op.data = pend.buf;
         pend.buf = NULL;
         pend.on = 0;
@@ -389,11 +414,11 @@ void imgcache_tick(uint32_t now) {
 
 /* --- чтение --- */
 
-int imgcache_read_start(const char *url) {
-    if (!mutex || !ready || off || pend.on || download_busy()) return 0;
+static int read_start(const char *url, int css) {
+    if (!mutex || !ready || off || (css && css_off) || pend.on || download_busy()) return 0;
     uint8_t key[5];
     url_key(url, key);
-    int i = find_key(key);
+    int i = find_key(key, css);
     if (i < 0) return 0;
     size_t ul = strlen(url);
     uint8_t *buf = ts_alloc(ents[i].size ? ents[i].size : 1);
@@ -407,7 +432,7 @@ int imgcache_read_start(const char *url) {
     if (read_url) ts_core->free(read_url);
     read_url = u;
     char name[20];
-    key_name(key, name);
+    key_name(key, css, name);
     ts_core->mutex_lock(mutex);
     if (op.st == ST_DUE && op.kind == OP_WRITE && op.job) {  /* запись ещё не начата — назад в очередь */
         op.job->next = queue;
@@ -420,10 +445,12 @@ int imgcache_read_start(const char *url) {
     if (op.st == ST_IDLE) {
         op_begin(OP_READ, name, ents[i].size);
         memcpy(op.key, key, 5);
+        op.css = (uint8_t)css;
         op.data = buf;
     } else {                                                  /* занят: чтение — следом, запись — прервать */
         pend.on = 1;
         memcpy(pend.key, key, 5);
+        pend.css = (uint8_t)css;
         memcpy(pend.name, name, sizeof(pend.name));
         pend.size = ents[i].size;
         pend.buf = buf;
@@ -435,6 +462,9 @@ int imgcache_read_start(const char *url) {
     ts_core->mutex_unlock(mutex);
     return 1;
 }
+
+int imgcache_read_start(const char *url) { return read_start(url, 0); }
+int imgcache_css_read_start(const char *url) { return read_start(url, 1); }
 
 int imgcache_read_poll(uint8_t **body, size_t *len, int *kind) {
     if (!mutex) return -1;
@@ -458,7 +488,7 @@ int imgcache_read_poll(uint8_t **body, size_t *len, int *kind) {
     op.kind = 0;
     __atomic_store_n(&op.st, ST_IDLE, __ATOMIC_RELEASE);
     ts_core->mutex_unlock(mutex);
-    if (ok && n >= HEAD && !memcmp(d, "TSIC", 4) && d[4] == 1 && d[5] <= IMGCACHE_PIX) {
+    if (ok && n >= HEAD && !memcmp(d, "TSIC", 4) && d[4] == 1 && d[5] <= IMGCACHE_CSS && (d[5] == IMGCACHE_CSS) == op.css) {
         ul = rd16(d + 6);
         bl = rd32(d + 8);
     }
@@ -475,7 +505,7 @@ int imgcache_read_poll(uint8_t **body, size_t *len, int *kind) {
         return 1;
     }
     /* Не вышло: файл — прочь из учёта (картинка придёт из сети и запишется заново, заменив его) */
-    int i = find_key(op.key);
+    int i = find_key(op.key, op.css);
     if (i >= 0) drop_entry(i);
     if (!ok) ts_log("tsafari: image cache: %s not read (code %02X)", op.name, code);
     else ts_log("tsafari: image cache: %s is another image or damaged", op.name);
@@ -513,16 +543,17 @@ void imgcache_read_cancel(void) {
  * освободит сам). 0 — не взят (body не тронут). */
 static int queue_body(const char *url, int kind, const void *pre, size_t pre_len, uint8_t *body, size_t len,
                       int again) {
-    if (!mutex || off || !len || len > FILE_MAX || pre_len > 64) return 0;
+    int css = kind == IMGCACHE_CSS;
+    if (!mutex || off || (css && css_off) || !len || len > FILE_MAX || pre_len > 64) return 0;
     size_t ul = strlen(url);
     if (!ul || ul > URL_LONGEST) return 0;
     uint32_t n = (uint32_t)(HEAD + ul + pre_len + len);
     if (queued + n > QUEUE_MAX) return 0;                     /* очередь полна — в другой раз */
     uint8_t key[5];
     url_key(url, key);
-    if (ready && !again && find_key(key) >= 0) return 0;
+    if (ready && !again && find_key(key, css) >= 0) return 0;
     for (wjob_t *w = queue; w; w = w->next)
-        if (!memcmp(w->key, key, 5)) return 0;
+        if (!memcmp(w->key, key, 5) && w->css == css) return 0;
     wjob_t *w = ts_alloc(sizeof(wjob_t));
     uint8_t *h = ts_alloc(HEAD + ul + pre_len);
     if (!w || !h) {
@@ -539,6 +570,7 @@ static int queue_body(const char *url, int kind, const void *pre, size_t pre_len
     if (pre_len) memcpy(h + HEAD + ul, pre, pre_len);
     memset(w, 0, sizeof(*w));
     memcpy(w->key, key, 5);
+    w->css = (uint8_t)css;
     w->again = again;
     w->head = h;
     w->head_len = (uint32_t)(HEAD + ul + pre_len);
@@ -562,6 +594,10 @@ void imgcache_store(const char *url, int kind, const void *pre, size_t pre_len, 
 
 void imgcache_give(const char *url, int kind, const void *pre, size_t pre_len, uint8_t *body, size_t len, int again) {
     if (!queue_body(url, kind, pre, pre_len, body, len, again) && body) ts_core->free(body);
+}
+
+void imgcache_css_store(const char *url, const uint8_t *body, size_t len, int again) {
+    imgcache_store(url, IMGCACHE_CSS, NULL, 0, body, len, again);
 }
 
 int imgcache_trim(void) {
@@ -599,8 +635,8 @@ static void list_part(const uint8_t *q, const uint8_t *end) {
         size_t k = 0;
         while (q + 9 + k < end && name[k]) k++;
         if (q + 9 + k >= end) break;                         /* нет конца имени */
-        uint8_t key[5];
-        if (name_key(name, k, key)) add_entry(key, rd32(q), (uint32_t)rd16(q + 4) << 16 | rd16(q + 6));
+        uint8_t key[5], css;
+        if (name_key(name, k, key, &css)) add_entry(key, css, rd32(q), (uint32_t)rd16(q + 4) << 16 | rd16(q + 6));
         else if (name_junk(name, k) && junk_n < JUNK_MAX) memcpy(junk[junk_n++], name, k + 1);
         q += 9 + k + 1;
     }

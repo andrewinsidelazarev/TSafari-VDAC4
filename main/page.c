@@ -37,7 +37,10 @@
 #include "font.h"
 #include "ts.h"
 
-enum { ITEM_RECT, ITEM_TEXT, ITEM_WIDGET };  /* прямоугольник, строка текста, встроенный элемент */
+enum { ITEM_RECT, ITEM_TEXT, ITEM_WIDGET, ITEM_BOX };  /* прямоугольник, строка текста, встроенный
+                                          * элемент, коробка CSS (fg — заливка, bg — рамка, flags —
+                                          * её толщина, face — радиус углов, glyph_at — цвет под ней,
+                                          * count ≠ 0 — толщины сторон по 4 бита: верх право низ лево) */
 
 /* Один элемент страницы. Глифы строк текста хранятся отдельно, в общем массиве pool:
  * у элемента только номер первого глифа (glyph_at) и их число (count). У встроенного элемента
@@ -92,7 +95,11 @@ static uint32_t dist(uint32_t a, uint32_t b) {
     return (uint32_t)(dr * dr + dg * dg + db * db);
 }
 /* Сплошной цвет: уже есть такой (сплошной или оттенок пары) — его номер; нет — новый
- * сплошной; места нет — ближайший из занятых. */
+ * сплошной; его 32 места заняты — из свободной части палитры, за оттенками пар (страницы с CSS
+ * берут много своих цветов: фоны, рамки, полупрозрачные смеси; 07.11 светло-серая сетка таблицы
+ * получала ближайший занятый цвет, и на плате линий не было видно);
+ * места нет совсем — ближайший из занятых. */
+#define PAL_KEEP 24                      /* столько записей в конце оставить оттенкам новых пар */
 static uint8_t pal_solid(uint32_t rgb) {
     uint16_t c = rgb565(rgb);
     unsigned best = 0;
@@ -106,6 +113,11 @@ static uint8_t pal_solid(uint32_t rgb) {
     if (solid_n < PAL_SOLIDS) {
         pal[solid_n] = c; pal_rgb[solid_n] = rgb; pal_dirty = 1;
         return (uint8_t)solid_n++;
+    }
+    if (pal_next + PAL_KEEP < 256u) {
+        unsigned i = pal_next++;
+        pal[i] = c; pal_rgb[i] = rgb; pal_dirty = 1;
+        return (uint8_t)i;
     }
     return (uint8_t)best;
 }
@@ -194,6 +206,28 @@ int page_rect(int x, int y, int w, int h, uint32_t rgb) {
     it->fg = rgb;
     if (y + h > height) height = y + h;
     return (int)(it - items);
+}
+
+int page_box(int x, int y, int w, int h, uint32_t fill, uint32_t border, int bw, int radius, uint32_t under) {
+    if (w <= 0 || h < 0) return -1;
+    item_t *it = new_item();
+    if (!it) return -1;
+    it->kind = ITEM_BOX; it->x = (int16_t)x; it->y = y; it->w = (uint16_t)w; it->h = (uint16_t)h;
+    it->fg = fill; it->bg = border;
+    it->flags = (uint8_t)(bw < 0 ? 0 : bw > 32 ? 32 : bw);
+    it->face = (uint8_t)(radius < 0 ? 0 : radius > 64 ? 64 : radius);
+    it->glyph_at = under;
+    if (y + h > height) height = y + h;
+    return (int)(it - items);
+}
+
+void page_box_sides(int index, int t, int r, int b, int l) {
+    if (index < 0 || (unsigned)index >= item_n || items[index].kind != ITEM_BOX) return;
+    int s[4] = {t, r, b, l};
+    for (int k = 0; k < 4; k++) s[k] = s[k] < 0 ? 0 : s[k] > 15 ? 15 : s[k];
+    items[index].count = (uint16_t)(s[0] << 12 | s[1] << 8 | s[2] << 4 | s[3]);
+    items[index].flags = 0;
+    items[index].face = 0;
 }
 
 void page_rect_height(int index, int h) {
@@ -384,6 +418,26 @@ void page_paint_text(int x, int y, unsigned face, const uint16_t *g, unsigned n,
     clip_l = ol; clip_r = orr;
 }
 
+/* Коробка CSS: без скругления — прямоугольники (рамка, внутри — заливка), со скруглением — два
+ * скруглённых (page_paint_round): рамка к цвету под коробкой, заливка к цвету рамки. */
+static void paint_box(const item_t *it) {
+    int x = it->x, y = it->y, w = it->w, h = it->h, bw = it->flags, r = it->face;
+    if (it->count) {                                   /* стороны разной толщины: рамка, внутри — заливка */
+        int t = it->count >> 12 & 15, rt = it->count >> 8 & 15, b = it->count >> 4 & 15, l = it->count & 15;
+        fill(cur_y0, cur_rows, x, y, w, h, pal_solid(it->bg));
+        if (w > l + rt && h > t + b) fill(cur_y0, cur_rows, x + l, y + t, w - l - rt, h - t - b, pal_solid(it->fg));
+        return;
+    }
+    if (!r) {
+        fill(cur_y0, cur_rows, x, y, w, h, pal_solid(bw ? it->bg : it->fg));
+        if (bw && w > 2 * bw && h > 2 * bw) fill(cur_y0, cur_rows, x + bw, y + bw, w - 2 * bw, h - 2 * bw, pal_solid(it->fg));
+        return;
+    }
+    if (!bw) { page_paint_round(x, y, w, h, r, it->fg, it->glyph_at); return; }
+    page_paint_round(x, y, w, h, r, it->bg, it->glyph_at);
+    if (w > 2 * bw && h > 2 * bw) page_paint_round(x + bw, y + bw, w - 2 * bw, h - 2 * bw, r > bw ? r - bw : 0, it->fg, it->bg);
+}
+
 /* Отправить полосу в кольцо. Если полоса упирается в конец кольца (строка 895), она идёт
  * двумя кусками: сколько влезло до конца — туда, остаток — в начало кольца. */
 static int upload(int y0, int rows) {
@@ -412,6 +466,8 @@ static int render_rows(int a, int b) {
             } else if (it->kind == ITEM_WIDGET) {
                 if (painter && it->y < y0 + rows && it->y + it->h > y0)
                     painter((int)it->glyph_at, it->x, it->y, it->w, it->h, it->bg);
+            } else if (it->kind == ITEM_BOX) {
+                if (it->y < y0 + rows && it->y + it->h > y0) paint_box(it);
             } else if (it->y < y0 + rows && it->y + it->h + 4 > y0) {      /* +4 — подчёркивание */
                 paint_text(y0, rows, it);
             }

@@ -356,7 +356,17 @@ void form_paint(int id, int x, int y, int w, int h, uint32_t bg) {
         uint32_t ink = c->ink ? c->ink : c->disabled ? COL_MUTED : COL_INK;
         if (!c->len && c->ph && !f) {                             /* подсказка в пустом поле */
             unsigned k = label_glyphs(str(c->ph), g, 128);
-            page_paint_text(tx, ty, c->face, g, k, COL_MUTED, fill, 0, x + 3, x + w - 3);
+            /* у поля свой цвет текста (CSS) — подсказка его же цвета, приглушённая к фону (как у
+             * браузеров: ::placeholder по умолчанию — цвет текста с прозрачностью 0,54); иначе — по
+             * дизайну */
+            uint32_t ph = COL_MUTED;
+            if (c->ink) {
+                ph = 0;
+                for (int s = 0; s < 24; s += 8)
+                    ph |= (((c->ink >> s & 255u) * 138u + (fill >> s & 255u) * 117u) / 255u) << s;
+                if (!ph) ph = 1;
+            }
+            page_paint_text(tx, ty, c->face, g, k, ph, fill, 0, x + 3, x + w - 3);
             break;
         }
         if (c->type != FC_TEXTAREA) {

@@ -11,7 +11,7 @@ FL="-std=gnu11 -O1 -g -DTSAFARI_HOST -D_CRT_SECURE_NO_WARNINGS -DMINIZ_NO_STDIO 
     -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ZLIB_APIS -DMINIZ_NO_ARCHIVE_APIS -DNDEBUG -Imain -Iinclude -Idesign
     -Ithird_party/miniz -Wall -Wno-unused-function"
 for f in main/ft.c main/font.c main/font_data.c main/page.c main/doc.c main/demo.c main/ui.c main/ui_data.c \
-         main/input.c main/url.c main/fetch.c main/download.c main/charset.c main/charset_data.c main/html.c main/form.c main/image.c main/gif.c \
+         main/input.c main/url.c main/fetch.c main/download.c main/charset.c main/charset_data.c main/css.c main/html.c main/form.c main/image.c main/gif.c \
          main/svg.c main/imgcache.c tests/host.c; do
     $CL $FL -Itests/copro -Ithird_party/libwebp -Ithird_party/nanosvg -c "$f" -o "$O/$(basename "$f" .c).o"
 done

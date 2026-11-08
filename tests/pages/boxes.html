@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Коробки CSS</title>
+<style>
+body { background: #f4f1ea; color: #222; }
+.wrap { max-width: 760px; margin: 0 auto; }
+.card { background: #ffffff; border: 2px solid #3a7bd5; border-radius: 12px; padding: 12px 16px; margin: 10px 0; }
+.note { background: #fff4c2; border-left: 0; border: 1px solid #d9b300; padding: 6px 10px; }
+.flat { background: #e3f6e8; padding: 8px; }
+.badge { width: 220px; margin: 8px auto; text-align: center; background: #222; color: #fff; border-radius: 16px; padding: 6px; }
+.logo { width: 96px; height: 64px; }
+.half { width: 50%; background: #dde7ff; padding: 4px; }
+h2 { margin: 4px 0; }
+</style></head>
+<body>
+<div class="wrap">
+<h2>Упрощённый CSS</h2>
+<div class="card">
+  Карточка: рамка 2 точки, скругление 12, поля 12 × 16, ширина — не больше 760 и по середине.
+  <div class="note">Вложенная коробка: жёлтая с тонкой рамкой.</div>
+  <p>Абзац внутри карточки после вложенной коробки.</p>
+</div>
+<div class="flat">Только фон и поля 8 точек — без рамки.</div>
+<div class="badge">Плашка 220 точек по середине</div>
+<p>Картинка с размером из класса: <img class="logo" src="photo.jpg" alt="фото"> — 96 × 64.</p>
+<div class="half">Половина ширины (width: 50%).</div>
+<div style="border: 3px dashed #c0392b; padding: 10px; margin: 12px 40px;">Рамка из style тега, поля снаружи 40 слева и справа.</div>
+</div>
+</body></html>

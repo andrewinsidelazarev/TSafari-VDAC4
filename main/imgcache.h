@@ -1,4 +1,6 @@
-/* Кэш картинок на карте Evo: папка Cache\Images рядом с TSAFARI.SPG (решение пользователя 07.11).
+/* Кэш картинок на карте Evo: папка Cache\Images рядом с TSAFARI.SPG (решение пользователя 07.11);
+ * в нём же — таблицы стилей страниц, в своей папке Cache\CSS (пользователь 07.11: «css в папку
+ * /Cache/CSS/»), файлами «XXXXXXXX.CSS»; кольцо 100 МБ — общее.
  *
  * ЗАЧЕМ. Картинка, пришедшая из сети, остаётся на карте, и в следующий раз (та же страница
  * завтра, другая страница с тем же логотипом, картинка, убранная из памяти при прокрутке)
@@ -42,10 +44,13 @@ void imgcache_tick(uint32_t now);
 /* Что лежит в файле кэша: файл картинки или точки экрана (их заголовок — у image.c). */
 #define IMGCACHE_FILE 0
 #define IMGCACHE_PIX  1
+#define IMGCACHE_CSS  2                  /* таблица стилей (папка Cache\CSS) */
 /* Начать чтение картинки url с карты (идущая запись прерывается и повторится потом). 1 — начато
  * (итог — imgcache_read_poll); 0 — её нет в кэше, кэш не готов или идёт загрузка файла на карту:
  * брать из сети. */
 int imgcache_read_start(const char *url);
+/* То же для таблицы стилей url (Cache\CSS); итог — тот же imgcache_read_poll (kind IMGCACHE_CSS). */
+int imgcache_css_read_start(const char *url);
 /* Итог чтения: 0 — ещё идёт; 1 — готово: *body (PSRAM, теперь — вызывающего), *len и *kind
  * (IMGCACHE_FILE или IMGCACHE_PIX); −1 — не вышло (брать из сети). */
 int imgcache_read_poll(uint8_t **body, size_t *len, int *kind);
@@ -60,6 +65,8 @@ void imgcache_read_cancel(void);
 void imgcache_store(const char *url, int kind, const void *pre, size_t pre_len, const uint8_t *body, size_t len,
                     int again);
 void imgcache_give(const char *url, int kind, const void *pre, size_t pre_len, uint8_t *body, size_t len, int again);
+/* Записать таблицу стилей url (копией) в Cache\CSS; again — как у imgcache_store. */
+void imgcache_css_store(const char *url, const uint8_t *body, size_t len, int again);
 /* Памяти не хватило (разбор картинки): копии в очереди на запись — прочь, идущая запись —
  * бросить (недописанный файл удалится при следующем запуске). 1 — что-то освободилось. */
 int imgcache_trim(void);

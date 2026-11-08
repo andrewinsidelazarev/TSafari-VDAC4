@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ru" class="root-page"><head><meta charset="utf-8"><title>Алфавит CSS</title>
+<!-- Проверка «алфавита CSS» (07.11): каждая строка говорит, каким её должно быть видно.
+     Текст «ОШИБКА» не должен появиться нигде: он внутри того, что CSS скрывает или отменяет. -->
+<link rel="stylesheet" href="css/alphabet.css" media="all">
+<link rel="stylesheet" href="css/print.css" media="print">
+<link rel="alternate stylesheet" href="css/late.css" title="Запасной вид">
+<style>
+:root { --accent: #2a6f97; --gap: 12px; }
+body { background: #f7f4ec; color: #222; }
+.wrap { max-width: 900px; margin: 0 auto; }
+.card { border: 2px solid var(--accent); padding: var(--gap) calc(var(--gap) * 2); margin: 0 0 var(--gap);
+        border-radius: 8px; background: hsl(200, 60%, 95%); }
+.a.b { color: rebeccapurple; }
+.a { font-weight: bold; }
+[data-kind="warn"] { background: #ffd2d2; }
+a[href^="https"] { color: #b00000; }
+.menu > li { border-left: 4px solid #2a6f97; padding-left: 6px; }
+.menu { list-style: none; padding-left: 0; }
+#spec { color: #0a7d32; }
+.spec { color: red; }
+.imp { color: #1f4fd1 !important; }
+.scope-a { --c: #c0392b; }
+.scope-b { --c: #2980b9; }
+.scope-a .v, .scope-b .v { color: var(--c); }
+.fallback { color: var(--nope, #8e44ad); }
+.half { width: calc(50% - 20px); background: #dde7ff; padding: 4px; }
+@media (max-width: 1024px) { .mq-ok { color: #0a7d32; } }
+@media screen and (min-width: 1025px) { .mq-bad { display: block; } .mq-gone { display: block; } }
+@media print { .mq-print { display: block; } }
+.mq-gone, .mq-print { display: none; }
+@supports (display: grid) { .sup { color: #0a7d32; } }
+@supports not (display: grid) { .sup { color: red; } }
+.alpha { color: rgba(0, 0, 0, 0.45); }
+.hex4 { background: #2a6f9740; }
+.up { text-transform: uppercase; }
+.cap { text-transform: capitalize; }
+.indent { text-indent: 48px; }
+.roman { list-style-type: upper-roman; }
+.latin { list-style: lower-alpha inside; }
+.cb { width: 300px; padding: 20px; border: 2px solid #555; margin: 6px 0; background: #fff; }
+.bb { box-sizing: border-box; }
+.sides { border-bottom: 3px solid #c0392b; border-left: 8px solid #c0392b; padding: 6px 10px; }
+.tall { min-height: 80px; background: #e3f6e8; padding: 6px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+           clip: rect(0, 0, 0, 0); border: 0; }
+.offscreen { position: absolute; left: -9999px; }
+.collapsed { height: 0; overflow: hidden; }
+.invisible { visibility: hidden; }
+.clear { opacity: 0; }
+.ti-hide { text-indent: -9999px; }
+.flag { display: inline-block; width: 20px; height: calc(20px * 0.75); }
+.flag img { width: 100%; height: 100%; }
+.tight p { margin: 0; }
+.big { font: bold 26px/1.2 Georgia, serif; }
+.pill { padding: 0 10px; background: #222; color: #fff; }
+.cols { display: flex; gap: 12px; }
+.cols .main { width: 70%; background: #dde7ff; padding: 6px; }
+.cols .side { width: 30%; background: #ffe9a8; padding: 6px; box-sizing: border-box; }
+.grow { display: flex; gap: 8px; }
+.grow > span { flex: 1; background: #e3f6e8; padding: 4px; }
+.grow > .two { flex: 2; }
+.menu-row { display: flex; justify-content: center; gap: 20px; list-style: none; padding: 0; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.grid3 > div { background: #f2dede; padding: 4px; }
+.grid-t { border-collapse: separate; border-spacing: 0; width: 100%; border: 1px solid rgba(0, 0, 0, .25); border-width: 1px 0 0 1px; }
+.grid-t td, .grid-t th { padding: 6px; border: 1px solid rgba(0, 0, 0, .25); border-width: 0 1px 1px 0; }
+.coll-t { border-collapse: collapse; }
+.coll-t td { border: 2px solid #c0392b; padding: 4px 10px; }
+.coll-t .hl { background: #ffe9a8; }
+.ratio-wrap { width: 320px; }
+.ratio { position: relative; padding-bottom: 50%; background: #dde7ff; }
+.ratio .tl { position: absolute; inset: 0 auto auto 0; width: 20px; height: 20px; }
+.ratio .mid { position: absolute; left: 50%; top: 50%; width: 80px; height: 60px; transform: scale(1.01) translate(-50%, -50%); }
+.ratio .cap-abs { position: absolute; left: 0; right: 0; bottom: 0; height: 24px; background: rgba(0, 0, 0, .6); color: #fff; }
+.rel-box { position: relative; padding: 8px; background: #e3f6e8; }
+.badge { position: absolute; top: -8px; right: 10px; background: #c0392b; color: #fff; padding: 0 6px; }
+.aspect { width: 200px; height: auto; }
+</style></head>
+<body class="home page-id-8">
+<div class="wrap">
+<h1 class="title">Алфавит CSS</h1>
+
+<div class="card">
+<p class="ext-ok">Внешняя таблица (link): зелёный жирный текст.</p>
+<p class="imp-ok">@import внутри внешней таблицы: жёлтый фон.</p>
+<p class="late-ok">alternate stylesheet не действует: не подчёркнуто.</p>
+<p class="print-bad">Таблица media=print не действует: обычный текст.</p>
+</div>
+
+<div class="card">
+<p class="a b">Два класса (.a.b): фиолетовый жирный.</p>
+<p class="a">Один класс (.a): жирный, не фиолетовый.</p>
+<p data-kind="warn">Атрибут [data-kind="warn"]: розовый фон.</p>
+<p>Ссылки: <a href="https://test.local/index.html">https — тёмно-красная</a>, <a href="index.html">обычная</a>.</p>
+<ul class="menu"><li>Ребёнок (&gt;): черта слева, без маркера
+  <ul><li>Внук: без своей черты, с маркером</li></ul></li></ul>
+<p id="spec" class="spec">Специфичность: #id главнее .класса ниже — зелёный.</p>
+<p class="imp" style="color: red">!important главнее style="…": синий.</p>
+</div>
+
+<div class="card">
+<div class="scope-a"><p class="v">var(--c) в .scope-a: красный.</p></div>
+<div class="scope-b"><p class="v">var(--c) в .scope-b: синий.</p></div>
+<p class="fallback">var(--нет, запасной): фиолетовый.</p>
+<div class="half">calc(50% − 20px): голубая полоса меньше половины ширины.</div>
+<p class="mq-ok">@media (max-width: 1024px) для экрана 1024: зелёный.</p>
+<p class="mq-gone">ОШИБКА: @media (min-width: 1025px) не для экрана 1024.</p>
+<p class="mq-print">ОШИБКА: @media print не для экрана.</p>
+<p class="sup">@supports (display: grid): зелёный.</p>
+<p class="alpha">rgba(0, 0, 0, 0.45): серый.</p>
+<p class="hex4">#rrggbbaa: бледно-голубой фон.</p>
+</div>
+
+<div class="card">
+<p class="up">text-transform: uppercase — привет, мир! hello</p>
+<p class="cap">capitalize: три слова тут</p>
+<p class="indent">text-indent 48 точек: первая строка начинается правее, а перенесённые строки этого абзаца идут от края, как у книги.</p>
+<ol class="roman"><li>римские</li><li>цифры</li><li>большие</li></ol>
+<ul class="latin"><li>латинские</li><li>буквы</li></ul>
+<div class="cb">content-box: 300 + поля 40 + рамка 4 = 344 точки</div>
+<div class="cb bb">border-box: ровно 300 точек</div>
+<div class="sides">Рамка по сторонам: снизу 3, слева 8.</div>
+<div class="tall">min-height: 80 точек.</div>
+</div>
+
+<div class="card">
+<p>Скрытое не видно: <span class="sr-only">ОШИБКА sr-only</span><span class="offscreen">ОШИБКА left -9999</span>конец строки.</p>
+<div class="collapsed">ОШИБКА: height 0 + overflow hidden</div>
+<p class="invisible">ОШИБКА: visibility hidden</p>
+<p class="clear">ОШИБКА: opacity 0</p>
+<p class="ti-hide">ОШИБКА: text-indent -9999px</p>
+<p>Флажок 20 × 15 (span 20 × calc(20px * 0.75), картинка 100%): <span class="flag"><img src="css/flag.svg" alt="флаг"></span> Русский</p>
+<div class="tight"><p>margin: 0 у абзацев —</p><p>строки вплотную,</p><p>без промежутков.</p></div>
+<p class="big">font: bold 26px — крупный жирный</p>
+<p>Поля строчного тега: <span class="pill">плашка</span> с отступами.</p>
+</div>
+
+<div class="card">
+<div class="cols"><div class="main">display: flex — колонка 70 % (голубая)</div><div class="side">и колонка 30 % справа (жёлтая)</div></div>
+<p class="grow"><span>flex: 1</span><span class="two">flex: 2 — вдвое шире</span><span>flex: 1</span></p>
+<ul class="menu-row"><li>меню</li><li>в строку</li><li>по центру</li></ul>
+<div class="grid3"><div>grid 1</div><div>grid 2</div><div>grid 3</div><div>4 — новая строка</div><div>5</div></div>
+</div>
+
+<div class="card">
+<table class="grid-t"><caption>Таблица по CSS: сетка в 1 точку, поля 6, ширина 100 %</caption>
+<tr><th>№</th><th>Название</th><th>Комментарий</th></tr>
+<tr><td>1</td><td>GND</td><td>Земля</td></tr>
+<tr><td>2</td><td></td><td>Не используется — строка в две строчки, ячейки той же высоты</td></tr>
+</table>
+<table class="coll-t"><tr><td>collapse:</td><td class="hl">рамки 2 точки</td><td>не двойные</td></tr>
+<tr><td>a</td><td>b</td><td>c</td></tr></table>
+</div>
+
+<div class="card">
+<div class="ratio-wrap"><div class="ratio"><img class="tl" src="css/corner.svg" alt=""><img class="mid" src="css/badge.svg" alt="флаг"><div class="cap-abs">подпись внизу коробки</div></div></div>
+<p>position: absolute — флаг 80 × 60 в середине голубой коробки 320 × 160, подпись внизу во всю её ширину; этот абзац — сразу под коробкой.</p>
+<div class="rel-box">Блок с position: relative<span class="badge">NEW</span> — красная плашка NEW у правого края, на верхней кромке блока.</div>
+<p>height: auto — пропорция из атрибутов 400 × 100: <img class="aspect" src="css/nothing.png" width="400" height="100" alt="нет картинки"> (место 200 × 50)</p>
+</div>
+</div>
+</body></html>

@@ -52,6 +52,11 @@ const char *html_link_target(int id);
 int html_link_part(int id);
 /* Как узнать, что ссылка посещённая (цвет ссылки — фиолетовый, по дизайну Codex). */
 void html_set_visited(int (*cb)(const char *url));
+/* Картинки data: страницы (адрес — сами байты картинки): у image.c и app.c вместо адреса — ключ
+ * «data:…». html_data_copy — копия байтов по ключу (PSRAM, теперь — вызывающего; NULL — нет);
+ * html_data_clear — новая страница: хранилище — прочь. */
+uint8_t *html_data_copy(const char *key, size_t *len);
+void html_data_clear(void);
 /* Заголовок страницы (<title>), UTF-8; пусто — нет. */
 const char *html_title(void);
 /* Вместо страницы — страница ошибки: какой адрес не открылся (url), что случилось (what) и

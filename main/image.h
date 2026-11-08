@@ -83,4 +83,8 @@ int image_poll(void);
 /* Стенд: из мест картинок, видимых при прокрутке top, — сколько всего, готовых и недоступных;
  * *used — сколько байт пула RAM_G занято. */
 void image_host_stats(int top, int *seen, int *ready, int *failed, uint32_t *used);
+/* Стенд: размер первого места картинки, адрес которой кончается на tail; 0 — такой нет. */
+int image_host_size(const char *tail, int *w, int *h);
+/* Стенд: где первое место такой картинки на странице и его размер; 0 — такой нет. */
+int image_host_rect(const char *tail, int *x, int *y, int *w, int *h);
 #endif

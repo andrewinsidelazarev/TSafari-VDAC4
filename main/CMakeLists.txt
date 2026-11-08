@@ -4,7 +4,7 @@ file(GLOB WEBP_SOURCES "${CMAKE_CURRENT_LIST_DIR}/../third_party/libwebp/src/dec
                        "${CMAKE_CURRENT_LIST_DIR}/../third_party/libwebp/src/utils/*.c")
 idf_component_register(
     SRCS app.c ft.c font.c font_data.c page.c doc.c demo.c ui.c ui_data.c input.c
-         url.c fetch.c download.c imgcache.c charset.c charset_data.c html.c form.c image.c gif.c svg.c svg_lib.c
+         url.c fetch.c download.c imgcache.c charset.c charset_data.c css.c html.c form.c image.c gif.c svg.c svg_lib.c
          ../third_party/miniz/miniz_tinfl.c ${WEBP_SOURCES}
     INCLUDE_DIRS "." "../include" "../design" "../third_party/miniz" "../third_party/libwebp"
                  "../third_party/nanosvg")
