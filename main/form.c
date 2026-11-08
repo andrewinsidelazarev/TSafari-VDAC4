@@ -70,6 +70,7 @@ typedef struct {
     uint16_t rows, cols;
     uint8_t face, pad, ty, cw;          /* начертание текста, отступ слева, верх текста, шаг буквы */
     uint8_t no_border;
+    uint8_t no_fill, empty_label;            /* без фона (CSS transparent); подпись пустая (value="") */
     uint32_t fill, ink;                 /* фон и текст с сайта (CSS); 0 — по дизайну */
 } ctl_t;
 typedef struct { uint32_t action, target; uint8_t post, cs; int16_t part; } form_t;
@@ -215,7 +216,7 @@ void form_size(const form_new_t *n, int max_w, int *w, int *h, int *desc) {
         bh = m.h; bd = m.h - base;
         break;
     case FC_SUBMIT: case FC_RESET: case FC_BUTTON: case FC_IMAGE: case FC_FILE:
-        bw = n->width > 0 ? n->width : (int)u8len(button_label(n->type, n->label, n->value)) * m.cw + 2 * m.pad + 4;   /* как у Codex: +32 */
+        bw = n->width > 0 ? n->width : (int)u8len(n->empty_label ? "" : button_label(n->type, n->label, n->value)) * m.cw + 2 * m.pad + 4;   /* как у Codex: +32 */
         if (bw < 44) bw = 44;
         bh = m.h; bd = m.h - base;
         break;
@@ -258,6 +259,8 @@ int form_add(const form_new_t *n, int max_w) {
     c->fill = n->fill;
     c->ink = n->ink;
     c->no_border = (uint8_t)(n->no_border != 0);
+    c->no_fill = (uint8_t)(n->no_fill != 0);
+    c->empty_label = (uint8_t)(n->empty_label != 0);
     if (is_textlike(n->type)) set_text(c, n->value ? n->value : "");
     return (int)ctl_n++;
 }
@@ -417,9 +420,9 @@ void form_paint(int id, int x, int y, int w, int h, uint32_t bg) {
         break;
     }
     case FC_SUBMIT: case FC_RESET: case FC_BUTTON: case FC_IMAGE: case FC_FILE: {
-        uint32_t fill = c->fill ? c->fill : c->disabled ? COL_OFF : COL_BUTTON;
-        page_paint_round(x, y, w, h, h < FIELD_H ? 4 : BUTTON_R, fill, bg);
-        unsigned k = label_glyphs(button_label(c->type, str(c->label), str(c->value)), g, 128);
+        uint32_t fill = c->no_fill ? bg : c->fill ? c->fill : c->disabled ? COL_OFF : COL_BUTTON;
+        if (!c->no_fill) page_paint_round(x, y, w, h, h < FIELD_H ? 4 : BUTTON_R, fill, bg);
+        unsigned k = c->empty_label ? 0 : label_glyphs(button_label(c->type, str(c->label), str(c->value)), g, 128);
         int bx = x + (w - (int)k * c->cw) / 2;
         if (bx < x + 4) bx = x + 4;
         page_paint_text(bx, ty, c->face, g, k, c->ink ? c->ink : COL_LABEL, fill, 0, x + 3, x + w - 3);

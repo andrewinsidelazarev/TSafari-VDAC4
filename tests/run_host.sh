@@ -10,10 +10,17 @@ CL=/e/zx/llvm/bin/clang
 FL="-std=gnu11 -O1 -g -DTSAFARI_HOST -D_CRT_SECURE_NO_WARNINGS -DMINIZ_NO_STDIO -DMINIZ_NO_TIME -DMINIZ_NO_MALLOC
     -DMINIZ_NO_DEFLATE_APIS -DMINIZ_NO_ZLIB_APIS -DMINIZ_NO_ARCHIVE_APIS -DNDEBUG -Imain -Iinclude -Idesign
     -Ithird_party/miniz -Wall -Wno-unused-function"
+# пролог JavaScript (main/js_prelude.js → js_prelude.h)
+"${PY:-/c/Users/andre/AppData/Local/Python/bin/python}" -I tools/gen_js_prelude.py
 for f in main/ft.c main/font.c main/font_data.c main/page.c main/doc.c main/demo.c main/ui.c main/ui_data.c \
-         main/input.c main/url.c main/fetch.c main/download.c main/charset.c main/charset_data.c main/css.c main/html.c main/form.c main/image.c main/gif.c \
-         main/svg.c main/imgcache.c tests/host.c; do
-    $CL $FL -Itests/copro -Ithird_party/libwebp -Ithird_party/nanosvg -c "$f" -o "$O/$(basename "$f" .c).o"
+         main/input.c main/url.c main/fetch.c main/download.c main/charset.c main/charset_data.c main/css.c main/html.c main/form.c main/image.c main/gif.c main/ico.c \
+         main/svg.c main/imgcache.c main/dom.c main/js.c main/js_sel.c main/start.c tests/host.c; do
+    $CL $FL -Itests/copro -Ithird_party/libwebp -Ithird_party/nanosvg -Ithird_party/quickjs -c "$f" -o "$O/$(basename "$f" .c).o"
+done
+# QuickJS (third_party/quickjs/README.md): без Atomics, без исходного текста функций; чужой код — без предупреждений
+for f in quickjs libregexp libunicode dtoa; do
+    $CL -std=gnu11 -O2 -D_CRT_SECURE_NO_WARNINGS -DNDEBUG -D__STDC_NO_ATOMICS__=1 -DJS_NO_FUNC_SOURCE -w \
+        -Ithird_party/quickjs -c third_party/quickjs/$f.c -o "$O/qjs_$f.o"
 done
 # nanosvg (third_party/nanosvg/README.md): чужой код — без предупреждений
 $CL $FL -Ithird_party/nanosvg -w -c main/svg_lib.c -o "$O/svg_lib.o"
@@ -42,6 +49,10 @@ for f in third_party/libwebp/src/dec/*.c third_party/libwebp/src/dsp/*.c third_p
 done
 $CL $FL -Dmain=tsafari_elf_main -c main/app.c -o "$O/app.o"
 $CL "$O"/*.o "$O"/cpwebp/*.o -o "$O/host.exe"
+# стенд скриптов на сохранённых сайтах (tests/js_host.c: страница из папки → скрипты → итог):
+# .obj — чтобы не попасть в *.o стенда (у обоих своя main)
+$CL $FL -Ithird_party/quickjs -c tests/js_host.c -o "$O/js_host.obj"
+$CL $(ls "$O"/*.o | grep -v '/host.o$') "$O/js_host.obj" "$O"/cpwebp/*.o -o "$O/js_host.exe"
 # «Карта» кэша картинок (host.c: snap/../card) — пустая: сценарий считает, что пришло по сети
 # (переадресация, 21_redirect), а картинки из прошлого прогона пришли бы с «карты»
 rm -rf "$O/card"

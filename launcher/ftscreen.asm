@@ -19,7 +19,8 @@
 ; в это время заливает ESP — порт FT812 не делим), образ RAM_G, окно «Starting TSafari...».
 ; FtShow — окно с другими строками (HL — лист). FtTick — кадр глобуса раз в ~100 мс; его зовут
 ; ожидания загрузчика (поиск по карте, обмен с ESP, передача ELF). FT812 не ответил — окна нет,
-; загрузка идёт как без него.
+; загрузка идёт как без него. FtBar = 1 — ELF передаётся в ESP: под «Starting TSafari...» полоса,
+; заполненная на долю Offset / ElfSize (пересчёт — с каждым кадром глобуса).
         INCLUDE "launcher_screen.inc"
 
 LS_PAGE0        EQU #40                 ; первая страница образа окна в SPG (tools/package.py)
@@ -283,6 +284,31 @@ FtDraw:
         add a,a
         add a,(LS_GLOBE0 >> 8) & 255
         ld (FtDl+LS_GLOBE_WORD+1),a
+        ; Полоса передачи ELF — последняя в листе. Передачи нет — на месте её первого слова конец
+        ; листа (DISPLAY = 0), и FT812 её не рисует.
+        ld a,(FtBar)
+        or a
+        jr nz,.bar
+        ld hl,0
+        ld (FtDl+LS_BAR_WORD),hl
+        ld (FtDl+LS_BAR_WORD+2),hl
+        jr .send
+.bar:
+        ; Правая вершина заполнения: X = LS_BAR_X0 + доля. В слове VERTEX2F X стоит как X·16,
+        ; сдвинутое на 15 бит, то есть байт 2 слова — младший байт X·8, байт 3 — старший | #40
+        ; (код команды). Байты 0–1 (Y) не меняются.
+        call FtBarPx
+        ld de,LS_BAR_X0
+        add hl,de
+        add hl,hl
+        add hl,hl
+        add hl,hl
+        ld a,l
+        ld (FtDl+LS_BAR_FILL+2),a
+        ld a,h
+        or #40
+        ld (FtDl+LS_BAR_FILL+3),a
+.send:
         ld hl,FtDl
         ld bc,LS_DL_BYTES
         ; FtSendDlRaw
@@ -296,6 +322,59 @@ FtSendDlRaw:
         ld de,REG_DLSWAP_LO
         call FtWrReg
         jp BootTrace
+
+; Доля переданного ELF в точках полосы: HL = Offset · 320 / ElfSize (0…LS_BAR_SPAN).
+; Сначала частное q = Offset / (ElfSize / 256) — сколько 256-х долей файла уже ушло (0…256),
+; потом q + q/4 — те же доли в точках (256 + 64 = 320). Деление «в столбик», как на бумаге, только
+; в двоичной системе: 24 раза сдвигаем делимое на бит влево, его старший бит переходит в остаток;
+; если остаток не меньше делителя — вычитаем делитель и пишем в частное 1, иначе 0. Цифры частного
+; въезжают в освободившиеся младшие биты делимого, так что в конце там само частное. ELF меньше
+; 8 МБ (ESP берёт модули до 2 МБ): делитель меньше #8000, и сдвинутый остаток влезает в 16 бит.
+; Портит AF, BC, DE (IX бережёт — им пользуется чтение карты).
+FtBarPx:
+        ld de,(ElfSize+1)               ; делитель DE = размер / 256 (байты 1 и 2 размера)
+        ld hl,LS_BAR_SPAN
+        ld a,d
+        or e
+        ret z                           ; ELF меньше 256 байт — сразу вся полоса
+        push ix
+        ld ix,(Offset)                  ; делимое C:IX = Offset (24 бита)
+        ld a,(Offset+2)
+        ld c,a
+        ld hl,0                         ; остаток
+        ld b,24
+.div:
+        add ix,ix                       ; делимое влево; бит 0 свободен — под цифру частного
+        rl c
+        adc hl,hl                       ; старший бит делимого — в остаток
+        or a
+        sbc hl,de
+        jr nc,.one
+        add hl,de                       ; не вычлось — остаток как был, цифра 0
+        djnz .div
+        jr .done
+.one:
+        inc ix                          ; цифра частного 1
+        djnz .div
+.done:
+        push ix
+        pop hl                          ; частное (C = 0: оно меньше 512)
+        pop ix
+        ld de,257                       ; больше 256 — только от округления размера: вся полоса
+        or a
+        sbc hl,de
+        add hl,de
+        jr c,.fit
+        ld hl,256
+.fit:
+        ld d,h                          ; HL = q + q/4
+        ld e,l
+        srl d
+        rr e
+        srl d
+        rr e
+        add hl,de
+        ret
 
 ; Образ RAM_G окна — со страниц SPG LS_PAGE0… через окно #C000 (потом окно — снова #20).
 ; Образ больше 16 КБ, а в окно памяти Z80 #C000–#FFFF помещается одна страница ОЗУ (16 КБ).
@@ -375,6 +454,7 @@ FtDlPaperEnd:
 
 FtOk: db 0                              ; 1 — FT812 ответил, окно показано
 FtFrame: db 0                           ; кадр вращения глобуса
+FtBar: db 0                             ; 1 — ELF передаётся: в окне полоса доли Offset / ElfSize
 FtLastFrame: db 0                       ; REG_FRAMES при прошлой смене кадра
 FtPage: db 0                            ; FtUploadImage: страница образа, адрес в RAM_G, остаток
 FtAddr: dw 0

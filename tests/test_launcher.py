@@ -244,11 +244,11 @@ class Ft812:
     смена листа — сразу: снимок листа — в dls (с меткой BootStage в момент смены)."""
     def __init__(self, m, answer=True):
         self.m = m; self.answer = answer; self.mem = {}; self.cmds = []; self.dls = []; self.frames = 0
-        self.tx = bytearray()
+        self.tx = bytearray(); self.frame_step = 1         # кадров за чтение REG_FRAMES (6 — смена листа каждый раз)
     def read(self, a):
         if a == 0x302000: return 0x7C if self.answer else 0
         if 0x302004 <= a < 0x302008:
-            if a == 0x302004: self.frames += 1
+            if a == 0x302004: self.frames += self.frame_step
             return self.frames >> 8 * (a - 0x302004) & 255
         if 0x2FFFFC <= a < 0x300000: return 0x201EE0 >> 8 * (a - 0x2FFFFC) & 255
         if 0x302054 <= a < 0x302058: return 0
@@ -414,6 +414,36 @@ class LauncherTest(unittest.TestCase):
         self.assertTrue(any(dl != search[0] for st, dl in m.ft.dls if st >= 6), "после поиска — лист запуска")
         self.assertEqual(m.vconfig[0], 4, "M_SEL = 1 — первым делом")
         self.assertTrue(esp.started)
+
+    def test_upload_progress_bar(self):
+        """Передача ELF: под «Starting TSafari...» полоса (пользователь 08.11: «нужен прогресс-бар
+        загрузки»), заполнение растёт до конца полосы; во время поиска по карте и при ELF из кэша
+        полосы нет — на месте её первого слова конец листа (DISPLAY)."""
+        inc = (ROOT / "build/launcher_screen.inc").read_text(encoding="utf-8")
+        val = lambda name: int(re.search(rf"{name}\s+EQU (\d+)", inc)[1])
+        bar, fill, x0, span = val("LS_BAR_WORD") // 4, val("LS_BAR_FILL") // 4, val("LS_BAR_X0"), val("LS_BAR_SPAN")
+        px = lambda w: (w >> 15 & 0x7FFF) // 16 - x0          # X вершины VERTEX2F → доля в точках
+        m = Machine(disk_image(), Esp(exit_after=3))
+        m.ft.frame_step = 6                                   # кадр глобуса — на каждом FtTick
+        m.run()
+        with_bar = [(st, px(dl[fill])) for st, dl in m.ft.dls if len(dl) > fill]
+        without = [st for st, dl in m.ft.dls if len(dl) == bar + 1]
+        self.assertIn(5, without, "поиск по карте — без полосы")
+        self.assertFalse([st for st, dl in m.ft.dls if len(dl) not in (3, bar + 1, fill + 3)], "лист цел (3 слова — бумага до окна)")
+        self.assertTrue(all(st >= 7 for st, x in with_bar), "полоса — только при передаче")
+        steps = [x for st, x in with_bar]
+        # доля по формуле FtBarPx для каждого переданного куска (по 1016 байт): q = Offset / (размер/256)
+        def share(off):
+            q = min(off // (len(ELF) >> 8), 256)
+            return q + q // 4
+        expect = [share(min(k * 1016, len(ELF))) for k in range(len(ELF) // 1016 + 2)]
+        self.assertEqual(sorted(set(steps)), expect, steps)
+        self.assertEqual(steps, sorted(steps), "заполнение не убывает")
+        self.assertEqual(steps[-1], span, "в конце — вся полоса")
+        esp = Esp(cached=True, exit_after=2)
+        m = Machine(disk_image(), esp)
+        m.run()
+        self.assertTrue(m.ft.dls and all(len(dl) in (3, bar + 1) for st, dl in m.ft.dls), "ELF из кэша — без полосы")
 
     def test_no_ft812_still_starts(self):
         esp = Esp(exit_after=2)

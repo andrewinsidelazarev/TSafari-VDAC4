@@ -133,6 +133,7 @@ int url_resolve(const char *base, const char *ref, char *out, size_t cap) {
                         (k && ((ref[k] >= '0' && ref[k] <= '9') || ref[k] == '+' || ref[k] == '-' || ref[k] == '.'))))
         k++;
     if (k && k < rlen && ref[k] == ':') {
+        if (url_is_internal(ref)) return put(out, cap, &n, ref, rlen);       /* свои страницы браузера tsafari:… */
         if (!starts_ci(ref, "http://") && !starts_ci(ref, "https://")) return 0;   /* mailto:, javascript: … */
         if (!put(out, cap, &n, ref, rlen)) return 0;
         char *p = strstr(out, "://") + 3;

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8"><title>Проверка JavaScript</title>
+<!-- Проверка JavaScript TSafari (08.11): каждая проверка пишет в журнал «JS-CHECK имя ok» или «FAIL»;
+     итог — строкой на странице (её видно на снимке стенда). -->
+<style>
+.hidden-by-css { display: none; }
+#box { color: rgb(10, 20, 30); }
+@media (min-width: 900px) { .wide-only { display: block; } }
+</style>
+<script src="js/lib.js"></script>
+</head>
+<body onload="window.bodyOnload = (window.bodyOnload || 0) + 1">
+<h1 id="title">Проверка JavaScript</h1>
+<div id="box" class="a b" data-user-id="42" style="margin: 4px">
+  <p class="first">один</p><p>два <b>жирно</b></p><span class="x y">три</span>
+</div>
+<ul id="list"><li>1</li><li class="odd">2</li><li>3</li><li>4</li></ul>
+<div class="hidden-by-css" id="hid">скрыто CSS</div>
+<form id="f"><input id="name" name="name" value="Петя"><input type="checkbox" id="cb" checked>
+<select id="sel"><option value="a">A</option><option value="b" selected>B</option></select></form>
+<p id="written">до<script>document.write('<b id="w">записано</b>');</script>после</p>
+<div id="result">JS не выполнялся</div>
+<img id="lazy" src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" data-src="img/real.png" alt="ленивая">
+<script>
+var results = [], order = [];
+function check(name, ok) { results.push([name, !!ok]); console.log('JS-CHECK ' + name + ' ' + (ok ? 'ok' : 'FAIL')); }
+function t(name, f) { try { check(name, f()); } catch (e) { console.log('JS-CHECK ' + name + ' FAIL ' + e); results.push([name, false]); } }
+
+t('lib-loaded', () => window.libValue === 7);
+t('getElementById', () => document.getElementById('box').tagName === 'DIV');
+t('querySelector', () => document.querySelector('#box > p.first').textContent === 'один');
+t('qsa-count', () => document.querySelectorAll('#list li').length === 4);
+t('nth-child', () => document.querySelector('#list li:nth-child(2)').className === 'odd');
+t('sibling', () => document.querySelectorAll('#list li.odd ~ li').length === 2 && document.querySelector('li.odd + li').textContent === '3');
+t('not', () => document.querySelectorAll('#list li:not(.odd)').length === 3);
+t('attr-selector', () => document.querySelector('[data-user-id="42"]').id === 'box');
+t('bad-selector-throws', () => { try { document.querySelector('a:has(b)'); return false; } catch (e) { return e instanceof SyntaxError; } });
+t('classList', () => { const b = document.getElementById('box'); b.classList.add('c'); b.classList.remove('a'); b.classList.toggle('d'); return b.className === 'b c d' && b.classList.contains('c'); });
+t('dataset', () => document.getElementById('box').dataset.userId === '42');
+t('style', () => { const b = document.getElementById('box'); b.style.backgroundColor = 'red'; return b.getAttribute('style').indexOf('background-color: red') >= 0 && b.style.margin === '4px'; });
+t('innerHTML', () => { const d = document.createElement('div'); d.innerHTML = '<i>x</i><b>y</b>'; return d.children.length === 2 && d.lastChild.tagName === 'B' && d.innerHTML === '<i>x</i><b>y</b>'; });
+t('textContent-set', () => { const s = document.querySelector('.x'); s.textContent = 'три!'; return s.innerHTML === 'три!'; });
+t('createElement-append', () => { const li = document.createElement('li'); li.appendChild(document.createTextNode('5')); document.getElementById('list').appendChild(li); return document.querySelectorAll('#list li').length === 5 && li.parentNode.id === 'list'; });
+t('insertBefore-remove', () => { const l = document.getElementById('list'); const n = document.createElement('li'); n.textContent = '0'; l.insertBefore(n, l.firstChild); const ok = l.firstElementChild.textContent === '0'; n.remove(); return ok && l.firstElementChild.textContent === '1'; });
+t('insertAdjacentHTML', () => { const p = document.querySelector('.first'); p.insertAdjacentHTML('afterend', '<em id="adj">!</em>'); return p.nextElementSibling.id === 'adj'; });
+t('cloneNode', () => { const c = document.getElementById('list').cloneNode(true); return c.children.length === 5 && !c.parentNode; });
+t('closest-matches', () => { const b = document.querySelector('#box b'); return b.closest('div').id === 'box' && b.matches('p > b'); });
+t('compareDocumentPosition', () => (document.getElementById('title').compareDocumentPosition(document.getElementById('box')) & 4) === 4);
+t('contains', () => document.body.contains(document.getElementById('list')) && !document.getElementById('list').contains(document.body));
+t('document.write', () => { const w = document.getElementById('w'); return w && w.previousSibling.tagName === 'SCRIPT' && w.nextSibling.data === 'после' && w.textContent === 'записано'; });
+t('form-values', () => document.getElementById('name').value === 'Петя' && document.getElementById('cb').checked && document.getElementById('sel').value === 'b');
+t('computed-display', () => getComputedStyle(document.getElementById('hid')).display === 'none' && getComputedStyle(document.getElementById('box')).display === 'block');
+t('computed-color', () => getComputedStyle(document.getElementById('box')).color === 'rgb(10, 20, 30)');
+t('matchMedia', () => matchMedia('(min-width: 900px)').matches && !matchMedia('(max-width: 600px)').matches);
+t('url', () => { const u = new URL('../a/./b?x=1&y=два#h', 'https://test.local/dir/sub/page.html'); return u.href === 'https://test.local/dir/a/b?x=1&y=%D0%B4%D0%B2%D0%B0#h' && u.searchParams.get('y') === 'два' && u.pathname === '/dir/a/b'; });
+t('location', () => location.hostname === 'test.local' && location.pathname === '/js.html');
+t('localStorage', () => { localStorage.setItem('k', 1); return localStorage.getItem('k') === '1' && localStorage.length === 1; });
+t('cookie', () => { document.cookie = 'a=1; path=/'; document.cookie = 'b=2'; return document.cookie === 'a=1; b=2'; });
+t('json-regexp', () => JSON.stringify({a: [1, 'x']}) === '{"a":[1,"x"]}' && /(\d+)-(\d+)/.exec('12-34')[2] === '34');
+t('math', () => Math.abs(Math.sinh(1) - 1.1752011936438014) < 1e-12 && Math.cbrt(27) === 3 && Math.hypot(3, 4) === 5 && Math.round(2.5) === 3 && Math.trunc(-1.7) === -1);
+t('date', () => { const d = new Date(Date.UTC(2026, 10, 8, 12, 0, 0)); return d.toISOString() === '2026-11-08T12:00:00.000Z' && d.getUTCDay() === 0; });
+t('textencoder', () => new TextDecoder().decode(new TextEncoder().encode('Ж')) === 'Ж');
+t('dynamic-inline-script', () => { const s = document.createElement('script'); s.textContent = 'window.dynRan = 1;'; document.head.appendChild(s); return window.dynRan === 1; });
+t('innerHTML-script-not-run', () => { const d = document.createElement('div'); document.body.appendChild(d); d.innerHTML = '<script>window.badRan = 1;<\/script>'; d.remove(); return !window.badRan; });
+
+/* события: захват, всплытие, once, preventDefault */
+(function () {
+    const box = document.getElementById('box'), b = box.querySelector('b'), seen = [];
+    document.addEventListener('ping', () => seen.push('doc-capture'), true);
+    box.addEventListener('ping', () => seen.push('box'));
+    b.addEventListener('ping', e => { seen.push('target'); e.preventDefault(); }, {once: true});
+    window.addEventListener('ping', () => seen.push('window'));
+    const ev = new CustomEvent('ping', {bubbles: true, cancelable: true, detail: 5});
+    const notCanceled = b.dispatchEvent(ev);
+    b.dispatchEvent(new CustomEvent('ping', {bubbles: false}));
+    check('events', seen.join() === 'doc-capture,target,box,window,doc-capture' && !notCanceled && ev.defaultPrevented);
+    let clicked = 0;
+    b.onclick = () => { clicked++; };
+    b.click();
+    check('onclick', clicked === 1);
+})();
+
+/* порядок: скрипты, DOMContentLoaded, load, таймеры, промисы */
+order.push('script');
+Promise.resolve().then(() => order.push('micro'));
+setTimeout(() => order.push('t20'), 20);
+setTimeout(() => order.push('t0'), 0);
+document.addEventListener('DOMContentLoaded', () => order.push('dcl'));
+window.addEventListener('load', () => order.push('load'));
+new IntersectionObserver(entries => entries.forEach(e => {
+    if (e.isIntersecting) { e.target.src = e.target.dataset.src; order.push('io'); }
+})).observe(document.getElementById('lazy'));
+(async () => { await null; order.push('async'); })();
+setTimeout(() => {
+    t('order', () => order.join() === 'script,micro,async,dcl,load,t0,io,t20');
+    t('body-onload', () => window.bodyOnload === 1);
+    t('lazy-image', () => document.getElementById('lazy').getAttribute('src') === 'img/real.png');
+    const ok = results.filter(r => r[1]).length, fail = results.filter(r => !r[1]).map(r => r[0]);
+    document.getElementById('result').textContent = 'JS: ' + ok + ' из ' + results.length + ' проверок верны' + (fail.length ? ' (не прошли: ' + fail.join(', ') + ')' : '');
+    console.log('JS-CHECK-DONE ' + ok + '/' + results.length);
+}, 100);
+</script>
+</body></html>

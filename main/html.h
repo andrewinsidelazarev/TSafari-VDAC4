@@ -33,6 +33,16 @@ typedef struct {
  * content_type — заголовок ответа (из него — кодировка), url — адрес страницы (от него
  * считаются относительные ссылки, url.h). */
 void html_render(const uint8_t *body, size_t len, const char *content_type, const char *url);
+/* Раскрыть сущности «&amp;», «&#1046;», «&nbsp;»… в строке s (UTF-8) на месте; новая длина. Мягкий
+ * перенос и невидимые соединители выбрасываются. Общая с деревом документа (dom.c). */
+size_t html_entities_decode(char *s, size_t n);
+/* Страница без своего содержимого, только скрипты. HTML_JS_RUNNING — скрипты идут (или ещё не
+ * начались): страница показывается как есть, пустая. Остальное — скрипты не справились: вместо
+ * пустой — «This page needs JavaScript» с причиной. html_js_shown — последняя раскладка была
+ * такой страницей (пустой или с объяснением). */
+enum { HTML_JS_RUNNING, HTML_JS_MEMORY, HTML_JS_ERRORS, HTML_JS_EMPTY };
+void html_js_note(int state);
+int html_js_shown(void);
 /* Страница — набор фреймов? Тогда записать их в out (не больше max) и вернуть их число;
  * обычная страница — 0. Ничего не рисует. */
 int html_frames(const uint8_t *body, size_t len, const char *content_type, const char *url,

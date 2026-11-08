@@ -53,7 +53,7 @@ size_t fetch_progress(void);
 int fetch_peek(fetch_result_t *r);
 /* Забрать память тела последней загрузки себе (её освобождает забравший; следующая загрузка
  * возьмёт новую). Можно только после того, как fetch_poll отдал итог. NULL — нечего брать. */
-uint8_t *fetch_take_body(void);
+uint8_t *fetch_take_body(void);   /* после данных — нулевой байт (не входит в длину) */
 /* Файл, а не страница: тип не текстовый или сервер сказал «attachment». */
 int fetch_is_file(const char *content_type, const char *disposition);
 /* Задача загрузки вышла (после ts_running = 0) — для stop(). */

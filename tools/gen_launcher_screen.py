@@ -9,8 +9,14 @@ Z80 сам текст не рисует: маски строк L4 готовят
 
 Выход:
   build/launcher_screen.bin — образ RAM_G [LS_BASE, LS_END), по 16 КБ на страницу SPG;
-  build/launcher_screen.inc — адреса, листы двух состояний (STATE_LOAD, STATE_SEARCH) и смещение
-                               слова кадра глобуса в листе.
+  build/launcher_screen.inc — адреса, листы двух состояний (STATE_LOAD, STATE_SEARCH), смещение
+                               слова кадра глобуса в листе и полоса передачи ELF.
+
+Полоса передачи ELF (пользователь 08.11: «нужен прогресс-бар загрузки … между Starting TSafari... и
+Please wait.») — как полоса загрузки у браузера (main/ui.c draw_download): дорожка цвета EDGE,
+заполнение MINT, высота 6, концы скруглены. В листе она последняя перед DISPLAY: Z80 пишет на место
+её первого слова DISPLAY, когда передачи нет (ELF уже в кэше ESP, поиск по карте), а при передаче
+меняет только правую вершину заполнения — X = LS_BAR_X0 + доля (0…LS_BAR_SPAN точек).
 """
 from __future__ import annotations
 
@@ -32,6 +38,10 @@ RAMG_WIFI = 0x0E6000                       # main/ui.c
 WIFI_COLS = 34
 WIFI_STRIDE = WIFI_COLS * CELL_W // 2
 WIFI_BYTES = WIFI_STRIDE * CELL_H
+BAR_SPAN = 320                             # ход заполнения в точках: 256 долей файла + четверть
+BAR_H = 6                                  # как TSA_UI_DOWNLOAD_BAR_HEIGHT
+BAR_R = BAR_H // 2
+BAR_W = BAR_SPAN + BAR_H                   # заполнение — от «точки» шириной 6 до всей дорожки
 LINES = ["Web browser for VDAC4 ZX Evolution",      # 0 — как у браузера
          "Starting TSafari...",                     # 1 — запуск
          "Please wait.",                            # 2
@@ -79,7 +89,16 @@ def bitmap(addr, fmt, stride, w, h):
             (0x08 << 24) | ((w & 0x1FF) << 9) | (h & 0x1FF), (0x29 << 24) | (((w >> 9) & 3) << 2) | ((h >> 9) & 3)]
 
 
-def build_dl(d: dict[str, int], state_line: int, hint_line: int) -> tuple[list[int], int]:
+def bar_geometry(d: dict[str, int]) -> tuple[int, int]:
+    """Левый край и верх полосы: по центру окна, посередине между строкой состояния (ячейка
+    высотой CELL_H) и подсказкой."""
+    x = d["TSA_UI_WIFI_CENTER_X"] - BAR_W // 2
+    top = d["TSA_UI_WIFI_STATE_Y"] + CELL_H
+    y = (top + d["TSA_UI_WIFI_HINT_Y"]) // 2 - BAR_R + 2   # +2: у строк сверху пустое место ячейки
+    return x, y
+
+
+def build_dl(d: dict[str, int], state_line: int, hint_line: int) -> tuple[list[int], int, int, int]:
     L4 = 2
     dl = [(0x02 << 24) | d["TSA_UI_COLOR_PAPER_RGB888"], (0x26 << 24) | 7, (0x05 << 24) | 1]
     x, y, w, h, r = (d["TSA_UI_WIFI_X"], d["TSA_UI_WIFI_Y"], d["TSA_UI_WIFI_WIDTH"], d["TSA_UI_WIFI_HEIGHT"],
@@ -101,8 +120,16 @@ def build_dl(d: dict[str, int], state_line: int, hint_line: int) -> tuple[list[i
                           (hint_line, d["TSA_UI_WIFI_HINT_Y"], d["TSA_UI_COLOR_UI_MUTED_RGB888"])):
         x_ = d["TSA_UI_WIFI_CENTER_X"] - len(LINES[line]) * CELL_W // 2
         dl += [rgb(col)] + bitmap(RAMG_WIFI + line * WIFI_BYTES, L4, WIFI_STRIDE, WIFI_COLS * CELL_W, CELL_H) + [v(x_, y_)]
+    # полоса передачи ELF: прямоугольники с толщиной линии BAR_R — скруглённые концы (как rrect в ui.c)
+    bx, by = bar_geometry(d)
+    bar_word = len(dl)                                    # BEGIN RECTS — сюда Z80 пишет DISPLAY
+    dl += [(0x1F << 24) | 9, (0x0E << 24) | (BAR_R * 16)]
+    dl += [rgb(d["TSA_UI_COLOR_EDGE_RGB888"]), v(bx + BAR_R, by + BAR_R), v(bx + BAR_W - BAR_R, by + BAR_R)]
+    dl += [rgb(d["TSA_UI_COLOR_MINT_RGB888"]), v(bx + BAR_R, by + BAR_R)]
+    fill_word = len(dl)                                   # правая вершина заполнения
+    dl += [v(bx + BAR_R, by + BAR_R)]
     dl += [0x21 << 24, 0]
-    return dl, globe_word
+    return dl, globe_word, bar_word, fill_word
 
 
 def main() -> int:
@@ -119,9 +146,13 @@ def main() -> int:
         image[at:at + WIFI_BYTES] = mask(text)
     (ROOT / "build").mkdir(exist_ok=True)
     (ROOT / "build" / "launcher_screen.bin").write_bytes(bytes(image))
-    dl_load, g1 = build_dl(d, 1, 2)
-    dl_search, g2 = build_dl(d, 3, 4)
-    assert g1 == g2 and len(dl_load) == len(dl_search)
+    dl_load, g1, b1, f1 = build_dl(d, 1, 2)
+    dl_search, g2, b2, f2 = build_dl(d, 3, 4)
+    assert (g1, b1, f1) == (g2, b2, f2) and len(dl_load) == len(dl_search)
+    bx, by = bar_geometry(d)
+    x0 = bx + BAR_R
+    # Z80 правит в вершине только байты 2 и 3 (X · 16 << 15): младший бит X·16 всегда 0, Y — в байтах 0–1
+    assert x0 + BAR_SPAN < 1024 and dl_load[f1] & 0xFFFF == v(x0 + BAR_SPAN, by + BAR_R) & 0xFFFF
     pages = (len(image) + 16383) // 16384
     inc = ["; Создано tools/gen_launcher_screen.py — не править вручную.",
            f"LS_BASE         EQU #{base:06X}           ; образ RAM_G окна запуска",
@@ -131,10 +162,14 @@ def main() -> int:
            f"LS_GLOBE_WORD   EQU {g1 * 4}                ; смещение BITMAP_SOURCE глобуса в листе",
            f"LS_GLOBE_FRAMES EQU {d['TSA_UI_GLOBE_FRAME_COUNT']}",
            f"LS_DL_BYTES     EQU {len(dl_load) * 4}",
+           f"LS_BAR_WORD     EQU {b1 * 4}                ; смещение BEGIN RECTS полосы (без передачи — DISPLAY)",
+           f"LS_BAR_FILL     EQU {f1 * 4}                ; смещение правой вершины заполнения",
+           f"LS_BAR_X0       EQU {x0}               ; X вершины при доле 0",
+           f"LS_BAR_SPAN     EQU {BAR_SPAN}               ; ход заполнения в точках",
            "LsDlLoad:", *[f"        dd #{w:08X}" for w in dl_load],
            "LsDlSearch:", *[f"        dd #{w:08X}" for w in dl_search], ""]
     (ROOT / "build" / "launcher_screen.inc").write_text("\n".join(inc), encoding="utf-8", newline="\n")
-    preview(d, image, base, dl_search)
+    preview(d, image, base, dl_load)
     print(f"launcher screen: {len(image)} bytes, {pages} pages, DL {len(dl_load)} words")
     return 0
 
@@ -164,7 +199,10 @@ def preview(d, image, base, dl):
     put(RAMG_WIFI, WIFI_STRIDE, WIFI_COLS * CELL_W, CELL_H, d["TSA_UI_WIFI_SUBTITLE_X"], d["TSA_UI_WIFI_SUBTITLE_Y"],
         c("TSA_UI_COLOR_UI_MUTED_RGB888"))
     put(d["TSA_UI_ASSET_GLOBE_00_RAM_G"], 16, 32, 32, d["TSA_UI_WIFI_GLOBE_X"], d["TSA_UI_WIFI_GLOBE_Y"], c("TSA_UI_COLOR_MINT_RGB888"))
-    for line, yy, k in ((3, d["TSA_UI_WIFI_STATE_Y"], "TSA_UI_COLOR_UI_TEXT_RGB888"), (4, d["TSA_UI_WIFI_HINT_Y"], "TSA_UI_COLOR_UI_MUTED_RGB888")):
+    bx, by = bar_geometry(d)                              # полоса передачи — заполнена на 40 %
+    dr.rounded_rectangle([bx, by, bx + BAR_W - 1, by + BAR_H - 1], BAR_R, fill=c("TSA_UI_COLOR_EDGE_RGB888"))
+    dr.rounded_rectangle([bx, by, bx + BAR_H + BAR_SPAN * 2 // 5 - 1, by + BAR_H - 1], BAR_R, fill=c("TSA_UI_COLOR_MINT_RGB888"))
+    for line, yy, k in ((1, d["TSA_UI_WIFI_STATE_Y"], "TSA_UI_COLOR_UI_TEXT_RGB888"), (2, d["TSA_UI_WIFI_HINT_Y"], "TSA_UI_COLOR_UI_MUTED_RGB888")):
         put(RAMG_WIFI + line * WIFI_BYTES, WIFI_STRIDE, WIFI_COLS * CELL_W, CELL_H,
             d["TSA_UI_WIFI_CENTER_X"] - len(LINES[line]) * CELL_W // 2, yy, c(k))
     out.save(ROOT / "build" / "launcher_screen_preview.png")

@@ -32,6 +32,7 @@
 #include <string.h>
 #include "image.h"
 #include "gif.h"
+#include "ico.h"
 #include "svg.h"
 #include "imgcache.h"
 #include "css.h"
@@ -99,7 +100,9 @@ typedef struct {
     int img, x, y, w, h, link;
     int aw, ah, max_w;                   /* размеры из HTML и ширина места — пересчитать размер */
     uint8_t placed, sized;               /* легло на страницу; размер задан в HTML (не от картинки) */
+    uint8_t back;                        /* фон-картинка коробки CSS (image_back_add): w × h — коробка */
     uint32_t bg;
+    image_bg_t bgs;                      /* у фона: размер и место в коробке */
 } place_t;
 
 static img_t *imgs;
@@ -217,6 +220,49 @@ void image_place(int id, int x, int y, uint32_t bg) {
     page_widget(x, y, p->w, p->h, id, bg, p->link);
 }
 
+int image_back_add(const char *url, const image_bg_t *bg) {
+    int gi = find_or_add(url, "");
+    if (gi < 0 || !grow((void **)&places, &place_cap, place_n + 1, sizeof(place_t))) return -1;
+    place_t *p = &places[place_n];
+    memset(p, 0, sizeof(*p));
+    p->img = gi; p->w = p->h = 1; p->link = -1; p->sized = 1; p->back = 1;
+    p->bgs = *bg;
+    if (p->bgs.size != 'c' && p->bgs.size != 'n' && p->bgs.size != 'l') p->bgs.size = 'a';   /* не сказан — auto */
+    return IMAGE_ID_BASE + (int)place_n++;
+}
+
+void image_back_set(int id, int x, int y, int w, int h, int has_text) {
+    unsigned k = (unsigned)(id - IMAGE_ID_BASE);
+    if (k >= place_n || !places[k].back) return;
+    place_t *p = &places[k];
+    p->x = x; p->y = y; p->w = w; p->h = h;
+    p->placed = (uint8_t)(!has_text && w > 0 && h > 0);   /* не легло — не грузится и не рисуется */
+}
+
+/* Размер фона на месте p, если у картинки свой размер iw × ih (CSS background-size). */
+static void back_size(const place_t *p, int iw, int ih, int *dw, int *dh) {
+    const image_bg_t *b = &p->bgs;
+    if (iw < 1) iw = 1;
+    if (ih < 1) ih = 1;
+    if (b->size == 'c' || b->size == 'n') {            /* cover — закрыть всю, contain — влезть целиком */
+        long sx = (long)p->w * 4096 / iw, sy = (long)p->h * 4096 / ih;
+        long s = b->size == 'c' ? (sx > sy ? sx : sy) : (sx < sy ? sx : sy);
+        *dw = (int)((long)iw * s / 4096);
+        *dh = (int)((long)ih * s / 4096);
+    } else if (b->size == 'l') {
+        int w = b->w < 0 ? -1 : b->wp ? p->w * b->w / 100 : b->w;
+        int h = b->h < 0 ? -1 : b->hp ? p->h * b->h / 100 : b->h;
+        if (w < 0 && h < 0) { w = iw; h = ih; }
+        else if (w < 0) w = (int)((long)iw * h / ih);
+        else if (h < 0) h = (int)((long)ih * w / iw);
+        *dw = w; *dh = h;
+    } else {
+        *dw = iw; *dh = ih;                            /* auto — свой размер */
+    }
+    if (*dw < 1) *dw = 1;
+    if (*dh < 1) *dh = 1;
+}
+
 /* --- заглушка (дизайн Codex 08b): светлая плашка с рамкой, значок картинки, у крупной — надпись
  * «Loading image…» или «Image unavailable» и подпись (alt или имя файла) --- */
 #define COL_PH_FILL  TSA_UI_COLOR_SOFT_RGB888
@@ -276,7 +322,54 @@ void image_dl(ft_dl_t *d, int top) {
         const place_t *p = &places[k];
         const img_t *g = &imgs[p->img];
         int sy = p->y - top;
-        if (!p->placed || g->state != IMG_READY || sy >= TS_H || sy + p->h <= 0 || sy < -2000) continue;
+        if (!p->placed || g->state != IMG_READY || sy >= TS_H || sy + p->h <= 0) continue;
+        if (p->back) {
+            /* Фон-картинка: размер по background-size, место по background-position, видно только
+             * внутри коробки (ножницы). Рисуется от верхнего левого видимого угла коробки, а сдвиг
+             * картинки — в BITMAP_TRANSFORM_C/F (так не выйти за пределы координат VERTEX2F). */
+            int dw, dh;
+            back_size(p, g->w ? g->w : g->dw, g->h ? g->h : g->dh, &dw, &dh);
+            int ox = p->bgs.xp ? (p->w - dw) * p->bgs.x / 100 : p->bgs.x;
+            int oy = p->bgs.yp ? (p->h - dh) * p->bgs.y / 100 : p->bgs.y;
+            int x0 = p->x + ox, y0 = sy + oy;                       /* где лёг бы верхний левый угол картинки */
+            int cx0 = p->x > 0 ? p->x : 0, cy0 = sy > 0 ? sy : 0;   /* видимая часть коробки */
+            int cx1 = p->x + p->w < TS_W ? p->x + p->w : TS_W, cy1 = sy + p->h < TS_H ? sy + p->h : TS_H;
+            if (x0 > cx0) cx0 = x0;                                 /* и самой картинки */
+            if (y0 > cy0) cy0 = y0;
+            if (x0 + dw < cx1) cx1 = x0 + dw;
+            if (y0 + dh < cy1) cy1 = y0 + dh;
+            if (cx1 <= cx0 || cy1 <= cy0) continue;
+            if (!began) {
+                dl_put(d, dl_begin(FT_BITMAPS));
+                dl_put(d, dl_color_a(255));
+                began = 1;
+            }
+            int a = (int)((long)g->dw * 256 / dw), e = (int)((long)g->dh * 256 / dh);   /* шаг по картинке, 8.8 */
+            dl_put(d, dl_scissor_xy((unsigned)cx0, (unsigned)cy0));
+            dl_put(d, dl_scissor_size((unsigned)(cx1 - cx0), (unsigned)(cy1 - cy0)));
+            dl_put(d, dl_color_rgb(0xFFFFFF));
+            if (g->pal) dl_put(d, dl_palette_source(g->pal));
+            dl_put(d, dl_source(g->addr));
+            dl_put(d, (0x07u << 24) | ((uint32_t)g->fmt << 19) | ((g->stride & 0x3FFu) << 9) | (g->dh & 0x1FFu));
+            dl_put(d, (0x28u << 24) | (((g->stride >> 10) & 3u) << 2) | ((g->dh >> 9) & 3u));
+            unsigned vw = (unsigned)(cx1 - cx0), vh = (unsigned)(cy1 - cy0);
+            dl_put(d, (0x08u << 24) | ((vw & 0x1FFu) << 9) | (vh & 0x1FFu));
+            dl_put(d, (0x29u << 24) | (((vw >> 9) & 3u) << 2) | ((vh >> 9) & 3u));
+            dl_put(d, (0x15u << 24) | ((uint32_t)a & 0x1FFFFu));
+            dl_put(d, (0x17u << 24) | ((uint32_t)((cx0 - x0) * a) & 0xFFFFFFu));   /* C: сдвиг по x, 15.8 */
+            dl_put(d, (0x19u << 24) | ((uint32_t)e & 0x1FFFFu));
+            dl_put(d, (0x1Au << 24) | ((uint32_t)((cy0 - y0) * e) & 0xFFFFFFu));   /* F: сдвиг по y */
+            dl_put(d, dl_vertex(cx0 * 16, cy0 * 16));
+            dl_put(d, (0x15u << 24) | 256u);
+            dl_put(d, (0x17u << 24));
+            dl_put(d, (0x19u << 24) | 256u);
+            dl_put(d, (0x1Au << 24));
+            dl_put(d, dl_scissor_xy(0, 0));
+            dl_put(d, dl_scissor_size(2048, 2048));
+            drawn++;
+            continue;
+        }
+        if (sy < -2000) continue;
         if (g->fmt == FT_L8) {                           /* серая: L8 — это прозрачность, под ней — чёрное */
             if (began) dl_put(d, dl_end());
             dl_put(d, dl_begin(FT_RECTS));
@@ -721,6 +814,17 @@ static void max_box(int gi, int *mw, int *mh) {
     for (unsigned k = 0; k < place_n; k++) {
         const place_t *p = &places[k];
         if (p->img != gi) continue;
+        if (p->back) {                                   /* фон: auto — свой размер; иначе — по коробке */
+            if (p->bgs.size == 'a' || (p->bgs.size == 'l' && p->bgs.w < 0 && p->bgs.h < 0)) { *mw = *mh = 0; return; }
+            int bw = p->w, bh = p->h;
+            if (p->bgs.size == 'l') {                    /* «256px auto» — ширина 256, высота — по ней */
+                bw = p->bgs.w < 0 ? 4000 : p->bgs.wp ? p->w * p->bgs.w / 100 : p->bgs.w;
+                bh = p->bgs.h < 0 ? 4000 : p->bgs.hp ? p->h * p->bgs.h / 100 : p->bgs.h;
+            }
+            if (bw > *mw) *mw = bw;
+            if (bh > *mh) *mh = bh;
+            continue;
+        }
         if (!p->sized) { *mw = *mh = 0; return; }        /* есть место «по картинке» — нужен весь размер */
         if (p->w > *mw) *mw = p->w;
         if (p->h > *mh) *mh = p->h;
@@ -754,7 +858,7 @@ void tsafari_free(void *p) { if (p) ts_core->free(p); }
  * картинка при прокрутке обратно встаёт сразу, без нового разбора. */
 
 enum { JOB_FREE, JOB_QUEUED, JOB_RUNNING, JOB_DONE };
-enum { KIND_GIF, KIND_WEBP, KIND_SVG };
+enum { KIND_GIF, KIND_WEBP, KIND_SVG, KIND_ICO };
 
 typedef struct {
     int state;                           /* JOB_… — меняется атомарно (две задачи) */
@@ -938,9 +1042,41 @@ static void gif_pix(job_t *j) {
     j->ok = 1;
 }
 
+/* ICO — картинка BMP из значка (ico.c) в рамку места на странице: ARGB4 с прозрачностью, RGB565
+ * без неё. PNG из значка сюда не попадает — его разбирает BL616 (decode). */
+static void ico_pix(job_t *j) {
+    uint32_t off = 0, size = 0;
+    int png = 0, sw, sh, tw, th, alpha = 0;
+    uint16_t *pix = NULL;
+    if (!ico_pick(j->body, j->len, j->mw > j->mh ? j->mw : j->mh, &off, &size, &png) || png ||
+        !ico_bmp_size(j->body + off, size, &sw, &sh)) {
+        snprintf(j->why, sizeof(j->why), "ICO not decoded");
+        return;
+    }
+    fit_box(sw, sh, j->mw, j->mh, &tw, &th);             /* не больше места; больше своего — нет */
+    if (tw > sw) tw = sw;
+    if (th > sh) th = sh;
+    int r = ico_bmp_decode(j->body + off, size, tw, th, &pix, &alpha);
+    if (r <= 0) {
+        snprintf(j->why, sizeof(j->why), r < 0 ? "no memory for ICO" : "ICO not decoded");
+        j->oom = r < 0;
+        return;
+    }
+    j->w = sw;
+    j->h = sh;
+    j->dw = tw;
+    j->dh = th;
+    j->pix = pix;
+    j->bytes = ((uint32_t)tw * (uint32_t)th * 2u + 3u) & ~3u;
+    j->fmt = alpha ? FT_ARGB4 : FT_RGB565;
+    j->alpha = (uint8_t)alpha;
+    j->ok = 1;
+}
+
 static void run_job(job_t *j) {
     if (j->kind == KIND_WEBP) webp_pix(j);
     else if (j->kind == KIND_SVG) svg_pix(j);
+    else if (j->kind == KIND_ICO) ico_pix(j);
     else gif_pix(j);
 }
 
@@ -1144,7 +1280,7 @@ int image_poll(void) {
     int relayout = 0;
     /* Не хватило памяти: освободить по шагам (free_for_job) — и ещё раз */
     if (!j->ok && j->oom && j->page == page_gen && free_for_job(j)) {
-        ts_log("tsafari: image %.120s: no memory, caches dropped (step %d), decoding again", str(imgs[j->gi].url),
+        ts_log_detail("tsafari: image %.120s: no memory, caches dropped (step %d), decoding again", str(imgs[j->gi].url),
                j->retried);
         j->oom = 0;
         j->why[0] = 0;
@@ -1175,8 +1311,8 @@ int image_poll(void) {
             j->pix = NULL;
         } else {
             g->state = IMG_FAILED;
-            if (j->bl616[0]) ts_log("tsafari: image %.120s: %s; BL616: %s", str(g->url), j->why, j->bl616);
-            else ts_log("tsafari: image %.120s: %s", str(g->url), j->why);
+            if (j->bl616[0]) ts_log_detail("tsafari: image %.120s: %s; BL616: %s", str(g->url), j->why, j->bl616);
+            else ts_log_detail("tsafari: image %.120s: %s", str(g->url), j->why);
         }
         /* Файл держать себе стоит, только если точки картинки не остались в PSRAM: с ними файл не
          * нужен, а память нужна разбору (WebP 2560×2560 — файл 1,2 МБ). Мелкий (SVG) — пусть будет. */
@@ -1265,6 +1401,17 @@ static int webp_for_bl616(const uint8_t *body, size_t len) {
 
 static int decode(img_t *g, int gi, uint8_t *body, size_t len, int *w, int *h, const char **why) {
     *why = "not an image";
+    /* Значок ICO (favicon): из картинок внутри — та, что подходит месту на странице (ico.h). PNG
+     * внутри — BL616, как обычный PNG (сам файл ICO остаётся картинке и кэшу на карте целиком);
+     * BMP — фоновой задаче ESP32 (ico_pix). */
+    if (ico_is(body, len)) {
+        uint32_t off = 0, size = 0;
+        int png = 0, mw, mh;
+        max_box(gi, &mw, &mh);
+        if (!ico_pick(body, len, mw > mh ? mw : mh, &off, &size, &png)) { *why = "ICO without images we can show"; return 0; }
+        if (png) return decode(g, gi, body + off, size, w, h, why);
+        return queue_job(gi, KIND_ICO, body, len, NULL);
+    }
     int jpeg = len >= 4 && body[0] == 0xFF && body[1] == 0xD8;
     int webp = len >= 12 && !memcmp(body, "RIFF", 4) && !memcmp(body + 8, "WEBP", 4);
     const char *bl616_why = NULL;                        /* почему WebP не разобрал BL616 */
@@ -1329,7 +1476,7 @@ static int load(int gi, uint8_t *body, size_t len) {
     else if (r < 0) { g->state = IMG_PARKED; g->wait = epoch; }   /* места нет — до прокрутки */
     else g->state = IMG_FAILED;
     changed = 1;
-    if (!r) ts_log("tsafari: image %.120s: %s", str(g->url), why);
+    if (!r) ts_log_detail("tsafari: image %.120s: %s", str(g->url), why);
     if (r <= 0 || g->alpha) redraw(gi);                 /* заглушку — прочь (у непрозрачной её закроет картинка) */
     return relayout_needed(gi);
 }
@@ -1422,6 +1569,20 @@ void image_host_stats(int top, int *seen, int *ready, int *failed, uint32_t *use
                     imgs[p->img].body != NULL, job.state);
     }
     for (unsigned i = 0; i < img_n; i++) *used += imgs[i].bytes;
+}
+
+/* Картинка по концу адреса: состояние (IMG_…), размер точек в RAM_G, формат FT. 0 — нет такой. */
+int image_host_info(const char *tail, int *state, int *dw, int *dh, int *fmt) {
+    size_t tl = strlen(tail);
+    for (unsigned i = 0; i < img_n; i++) {
+        const char *u = str(imgs[i].url);
+        size_t ul = strlen(u);
+        if (ul >= tl && !strcmp(u + ul - tl, tail)) {
+            *state = imgs[i].state; *dw = imgs[i].dw; *dh = imgs[i].dh; *fmt = imgs[i].fmt;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 int image_host_size(const char *tail, int *w, int *h) {

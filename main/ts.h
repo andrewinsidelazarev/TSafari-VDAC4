@@ -47,3 +47,10 @@ extern volatile int ts_running;
 void *ts_alloc(size_t bytes);
 /* Строка в журнал прошивки (как printf). Журнал виден по сети: tools/read_boot.py, консоль. */
 #define ts_log(...) ts_core->log(__VA_ARGS__)
+/* Подробная строка — о каждом ресурсе страницы (картинка, таблица стилей, кэш на карте, раскладка
+ * заново): на плате не чаще раза в 10 с, на стенде — все (почему — app.c, ts_log_quota). */
+int ts_log_quota(void);
+#define ts_log_detail(...) do { if (ts_log_quota()) ts_core->log(__VA_ARGS__); } while (0)
+/* Долгая работа без передышки (раскладка большой страницы): раз в 100 мс отдать ядро на 1 мс.
+ * Звать часто — в цикле разбора; сама решает, пора ли (app.c). */
+void ts_yield(void);

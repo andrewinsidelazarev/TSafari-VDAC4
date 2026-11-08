@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Пусто</title></head>
+<!-- Страница, которую строит скрипт (как одностраничные приложения): без скриптов видимого нет —
+     пока скрипт идёт, страница пустая (без «This page needs JavaScript»), потом — та, что он построил. -->
+<body><div id="app"></div>
+<script>
+document.title = 'Built by JS';
+document.getElementById('app').innerHTML =
+    '<h1>Страницу построил скрипт</h1><p>Абзац и список:</p><ul><li>один</li><li>два</li></ul>';
+</script>
+</body></html>

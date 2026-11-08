@@ -26,6 +26,7 @@
  * (html_part) в одну составную страницу. У каждой ссылки запоминается её target и номер
  * фрейма, в котором она стоит, — по ним app.c решает, куда её открыть. */
 #include <stdio.h>
+#include <stdlib.h>                      /* strtod — длины background-size */
 #include <string.h>
 #include "html.h"
 #include "doc.h"
@@ -129,6 +130,8 @@ typedef struct {
     int16_t link;                        /* номер ссылки или −1 */
     uint8_t block, box, pre_was, list;   /* блочный; открыл блок с фоном; <pre> до него; открыл список */
     uint8_t css;                         /* открыл коробку CSS (doc_cssbox_begin) */
+    int bgid;                            /* место фона-картинки (image_back_add), 0 — нет */
+    unsigned bgmark;                     /* doc_text_count, когда коробка открылась: был ли в ней текст */
     uint8_t tt, ls;                      /* text-transform (1 — ВЕРХНИЙ, 2 — нижний, 3 — С Заглавной); маркер (LS_…) */
     int8_t align;                        /* выравнивание до него */
     int16_t indent;                      /* отступ до него */
@@ -138,6 +141,7 @@ typedef struct {
     uint8_t anon, ovh;                   /* обёртка колонки flex (селекторы её не видят); overflow: hidden */
     uint8_t fclear;                      /* в нём были плавающие блоки — при закрытии опуститься ниже них */
     uint8_t nowrap;                      /* white-space: nowrap — строки не переносить (наследуется) */
+    uint8_t clip, ell;                   /* внутри overflow: hidden; text-overflow: ellipsis (наследуются копией) */
     int16_t fmark;                       /* сколько плавающих было, когда он открылся (doc_float_mark) */
     uint8_t pos;                         /* position задан (relative, absolute…): блок отсчёта для absolute */
     int32_t cbx, cby, cbw, cbh;          /* его «коробка с полями» (padding box): где и какого размера;
@@ -175,7 +179,8 @@ static char *scratch(size_t n) {
 /* Стиль текста — верхней записи стека. */
 static doc_style_t style_now(void) {
     const st_t *t = top();
-    doc_style_t s = {t->fg, t->bg, t->flags | (t->nowrap ? DOC_NOWRAP : 0u), t->link, t->face};
+    doc_style_t s = {t->fg, t->bg, t->flags | (t->nowrap ? DOC_NOWRAP : 0u) | (t->nowrap && t->clip ? DOC_CLIP : 0u) |
+                     (t->nowrap && t->clip && t->ell ? DOC_ELLIPSIS : 0u), t->link, t->face};
     return s;
 }
 /* Тот же стиль без ссылки, подчёркивания и зачёркивания (пробел перед ссылкой, пометки). */
@@ -249,7 +254,7 @@ static const struct { const char *name; uint16_t code; } entities[] = {
 /* Заменить сущности «&…;» знаками UTF-8 прямо в той же строке: знак в UTF-8 (до 4 байт)
  * никогда не длиннее своей записи «&…;», поэтому результат помещается на место исходного.
  * Мягкий перенос (&shy;) и невидимые соединители просто выбрасываются. */
-static size_t entities_decode(char *s, size_t n) {
+size_t html_entities_decode(char *s, size_t n) {
     size_t i = 0, o = 0;
     while (i < n) {
         if (s[i] != '&') { s[o++] = s[i++]; continue; }
@@ -325,7 +330,7 @@ static void out_text(char *w, size_t o) {
 static void text(const uint8_t *p, size_t n) {
     char *u = scratch(2 * (n * 3 + 8));                        /* вход UTF-8 и вывод — раздельно */
     if (!u) return;
-    size_t len = entities_decode(u, charset_to_utf8(cs, p, n, u));
+    size_t len = html_entities_decode(u, charset_to_utf8(cs, p, n, u));
     if (in_title) {
         if (title_lock) return;
         for (size_t i = 0; i < len && title_len < (int)sizeof(title) - 1; i++) {
@@ -408,7 +413,7 @@ static int attr(const char *a, size_t n, const char *name, char *out, size_t cap
             size_t len = v1 - v0, room = cs == CS_UTF8 ? cap - 1 : (cap - 1) / 3;
             if (len > room) len = room;
             size_t got = charset_to_utf8(cs, (const uint8_t *)a + v0, len, out);
-            out[entities_decode(out, got)] = 0;
+            out[html_entities_decode(out, got)] = 0;
             return 1;
         }
         i = k > i ? k : i + 1;
@@ -480,6 +485,15 @@ static uint32_t mix(uint32_t c, uint32_t u, int a) {
  * under: полупрозрачный — смешан с ним. 0 — не цвет или почти прозрачный. Чистый чёрный
  * отдаётся как 0x000001: 0 в стиле значит «своего цвета нет», а на экране разницы не видно
  * (RGB565 младших битов не хранит). */
+/* Цвет рамки «прозрачный» (transparent, rgba(…, 0)): место рамка занимает, а видно сквозь неё
+ * фон — open_box красит её цветом под ней (фон коробки или страницы). Знак — этот цвет в bx.bc. */
+#define BC_CLEAR 0xFF000000u
+/* Цвет почти прозрачный (что css_rgb не берёт)? */
+static int css_clear(const char *v, uint32_t cur) {
+    uint32_t c;
+    int a;
+    return css_color(v, cur, &c, &a) && a < 16;
+}
 static int css_rgb(const char *v, uint32_t cur, uint32_t under, uint32_t *out) {
     uint32_t c;
     int a;
@@ -514,7 +528,14 @@ static unsigned face_step(unsigned face, int d) {
 
 /* Размер шрифта CSS (px, pt, em, rem, %, calc(…); слова small, large…) → начертание; −1 — не
  * понят. Обычный текст сайтов — 16 px, у нас он основной 20 px; крупнее и мельче — ближайшее
- * начертание. Проценты и em — от 16 (не от размера родителя: начертаний всего шесть). */
+ * начертание. Проценты и em — от размера родителя (его начертание cur — в пикселях CSS, face_px):
+ * «font-size: 100%» в правиле сброса у ссылки внутри заголовка 1.31em оставляет её заголовком
+ * (страница результатов DuckDuckGo); rem — от 16. */
+static int x100(const char *v);              /* ниже: число с дробью ×100 */
+static int face_px(unsigned face) {
+    return face == FACE_H1 ? 28 : face == FACE_H2 ? 22 : face == FACE_H3 ? 18 : face == FACE_SMALL ? 13 :
+           face == FACE_CAPTION ? 10 : 16;
+}
 static int css_face(const char *v, unsigned cur) {
     static const struct { const char *w; uint8_t f; } words[] = {
         {"xx-small", FACE_CAPTION}, {"x-small", FACE_CAPTION}, {"small", FACE_SMALL}, {"medium", FACE_BODY},
@@ -522,8 +543,19 @@ static int css_face(const char *v, unsigned cur) {
     for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i++) if (is(v, words[i].w)) return words[i].f;
     if (is(v, "smaller")) return (int)face_step(cur, -1);
     if (is(v, "larger")) return (int)face_step(cur, 1);
-    int px;
-    if (css_len(v, 16, &px) != 1 || px < 0 || px > 500) return -1;
+    int px, k;
+    size_t l = strlen(v);
+    char num[24];
+    int em = l > 2 && !strcmp(v + l - 2, "em") && v[l - 3] != 'r', pc = l > 1 && v[l - 1] == '%';
+    if ((em || pc) && l - (em ? 2 : 1) < sizeof(num)) {               /* от размера родителя */
+        memcpy(num, v, l - (em ? 2 : 1));
+        num[l - (em ? 2 : 1)] = 0;
+        if ((k = x100(num)) < 0) return -1;
+        px = face_px(cur) * k / (em ? 100 : 10000);
+    } else if (css_len(v, 16, &px) != 1) {
+        return -1;
+    }
+    if (px < 0 || px > 500) return -1;
     return px >= 26 ? FACE_H1 : px >= 20 ? FACE_H2 : px >= 17 ? FACE_H3 : px >= 14 ? FACE_BODY : px >= 12 ? FACE_SMALL
                                                                                                    : FACE_CAPTION;
 }
@@ -556,6 +588,7 @@ static st_t *push(const char *name) {
     e->fmark = (int16_t)doc_float_mark();
     e->pos = 0;
     e->block = e->box = e->list = e->css = 0;
+    e->bgid = 0;
     e->pre_was = (uint8_t)pre;
     return e;
 }
@@ -570,6 +603,11 @@ static void pop_one(void) {
      * абзацев их обтекает, как у браузеров */
     if (e->fclear) doc_float_clear(e->fmark, 3);
     if (e->css) doc_cssbox_end();                     /* коробка открыта после фона тега (pre) */
+    if (e->css && e->bgid) {                          /* фон-картинка: прямоугольник коробки и был ли текст */
+        int x, y, w, h;
+        doc_last_box(&x, &y, &w, &h);
+        image_back_set(e->bgid, x, y, w, h, doc_text_count() != e->bgmark);
+    }
     if (e->box) doc_box_end(4);
     if (e->block) { doc_align(e->align); doc_indent(e->indent); pre = e->pre_was; }
     if (e->list && depth > 0) depth--;
@@ -607,6 +645,7 @@ static void close_p(void) {
  * поток сверху вниз; float встаёт у края (float_box), position: absolute — на своё место вне
  * потока (abs_box), position: fixed — в потоке (у нас страница, а не окно с прокруткой). */
 static char last_display;                /* display последнего apply_style: 'n' none, 'i' строчный, 'b' иное */
+static int bg_clear;                     /* последний apply_style: background — transparent / none */
 static int margin_left;                  /* поле слева строчного тега из CSS (последний apply_style) */
 static uint32_t cur_fg;                  /* цвет текста элемента — для currentColor */
 static int len_wbase, len_hbase;         /* от чего считать проценты ширины и высоты (−1 — не от чего) */
@@ -666,6 +705,95 @@ static int word(const char **pp, char *w, size_t cap) {
     return 1;
 }
 
+/* --- фон-картинка (background-image) ---
+ * Адрес — из url(…) (градиенты не рисуем), размер — background-size (cover, contain, ширина и
+ * высота: точки, проценты коробки, auto), место — background-position (left, center, right, top,
+ * bottom, проценты, точки). Повтор (background-repeat) не делаем: картинка — один раз. Сокращение
+ * background: «url(x) center / cover no-repeat» — то же самое одной строкой. */
+static int bg_len(const char *w, int *v, uint8_t *pc) {
+    char *end;
+    double x = strtod(w, &end);
+    if (end == w) return 0;
+    *pc = *end == '%';
+    *v = (int)(!*pc && (!strncmp(end, "em", 2) || !strncmp(end, "rem", 3)) ? x * 16.0 : x);
+    return 1;
+}
+static void bg_size(const char *s, image_bg_t *b) {
+    char w1[32] = "", w2[32] = "";
+    const char *p = s;
+    word(&p, w1, sizeof(w1));
+    word(&p, w2, sizeof(w2));
+    if (is(w1, "cover")) { b->size = 'c'; return; }
+    if (is(w1, "contain")) { b->size = 'n'; return; }
+    b->size = 'l';
+    b->w = b->h = -1;
+    b->wp = b->hp = 0;
+    if (strcmp(w1, "auto") && !bg_len(w1, &b->w, &b->wp)) b->w = -1;
+    if (w2[0] && strcmp(w2, "auto") && !bg_len(w2, &b->h, &b->hp)) b->h = -1;
+    if (b->w < 0 && b->h < 0) b->size = 'a';
+}
+/* Одно слово места: x или y, проценты или точки; 1 — разобрано. */
+static void bg_pos(const char *s, image_bg_t *b) {
+    char w[2][32] = {"", ""};
+    const char *p = s;
+    int n = 0;
+    while (n < 2 && word(&p, w[n], sizeof(w[n]))) n++;
+    if (!n) return;
+    /* «top left», «bottom center» — вертикальное первым: поменять местами */
+    if (n == 2 && (is(w[0], "top") || is(w[0], "bottom") || is(w[1], "left") || is(w[1], "right"))) {
+        char t[32];
+        memcpy(t, w[0], 32); memcpy(w[0], w[1], 32); memcpy(w[1], t, 32);
+    }
+    if (n == 1) {                                     /* одно слово: второе — center */
+        if (is(w[0], "top") || is(w[0], "bottom")) { memcpy(w[1], w[0], 32); snprintf(w[0], 32, "center"); }
+        else snprintf(w[1], 32, "center");
+    }
+    for (int k = 0; k < 2; k++) {
+        int *v = k ? &b->y : &b->x;
+        uint8_t *pc = k ? &b->yp : &b->xp;
+        if (is(w[k], "left") || is(w[k], "top")) { *v = 0; *pc = 1; }
+        else if (is(w[k], "center")) { *v = 50; *pc = 1; }
+        else if (is(w[k], "right") || is(w[k], "bottom")) { *v = 100; *pc = 1; }
+        else if (!bg_len(w[k], v, pc)) { *v = 0; *pc = 1; }
+    }
+}
+/* url(…) из значения: адрес без кавычек в out; 0 — нет адреса (none, градиент, #id). */
+static int bg_url(const char *v, char *out, size_t cap) {
+    const char *p = strstr(v, "url(");
+    out[0] = 0;
+    if (!p || strstr(v, "gradient(")) return 0;
+    p += 4;
+    while (*p == ' ') p++;
+    char q = *p == '"' || *p == '\'' ? *p++ : ')';
+    size_t k = 0;
+    while (*p && *p != q && k + 1 < cap) out[k++] = *p++;
+    while (k && out[k - 1] == ' ') k--;
+    out[k] = 0;
+    return k > 0 && out[0] != '#';
+}
+/* Сокращение background: после url(…) — место и «/ размер». */
+static void bg_short(const char *v, image_bg_t *b) {
+    const char *u = strstr(v, "url(");
+    const char *p = u ? strchr(u, ')') : NULL;
+    if (!p) return;
+    p++;
+    char pos[64] = "", size[64] = "", w[32];
+    int after = 0;
+    while (word(&p, w, sizeof(w))) {
+        if (!strcmp(w, "/")) { after = 1; continue; }
+        char *sl = strchr(w, '/');                    /* «center/cover» без пробелов */
+        if (sl) { *sl = 0; if (w[0]) snprintf(pos + strlen(pos), sizeof(pos) - strlen(pos), "%s ", w);
+                  snprintf(size + strlen(size), sizeof(size) - strlen(size), "%s ", sl + 1); after = 1; continue; }
+        int lenlike = (w[0] >= '0' && w[0] <= '9') || w[0] == '-' || w[0] == '.';
+        int poskw = is(w, "left") || is(w, "right") || is(w, "top") || is(w, "bottom") || is(w, "center");
+        int sizekw = is(w, "cover") || is(w, "contain") || is(w, "auto");
+        if (after && (lenlike || sizekw)) snprintf(size + strlen(size), sizeof(size) - strlen(size), "%s ", w);
+        else if (!after && (lenlike || poskw)) snprintf(pos + strlen(pos), sizeof(pos) - strlen(pos), "%s ", w);
+    }
+    if (pos[0]) bg_pos(pos, b);
+    if (size[0]) bg_size(size, b);
+}
+
 /* --- коробка блока (doc_box_t) ---
  * Собирается в bx и bs (apply_decls), открывается в open_box. Размеры в bx — как их сказал CSS
  * (width — у содержимого или, при box-sizing: border-box, по внешнему краю); в doc.c они уходят
@@ -686,12 +814,16 @@ static struct {
     uint8_t fixed;                            /* position: fixed */
     int minw_v, minh_v, maxh_v;               /* min-width, min-height, max-height */
     int indent;                               /* text-indent (> 0) */
-    uint8_t disp, fcol, wrap, just;           /* display: 'f' flex, 'g' grid; column; flex-wrap; justify-content */
+    uint8_t disp, fcol, wrap, just;           /* display: 'f' flex, 'g' grid, 't' таблица; column; flex-wrap; justify-content */
+    uint8_t trow;                             /* display: table-row — строка CSS-таблицы (во всю ширину) */
+    char bgimg[URL_MAX];                      /* background-image: адрес (пусто — нет) */
+    image_bg_t bgsp;                          /* background-size и background-position */
     uint8_t aic;                              /* align-items: center */
     int cgap, rgap;                           /* gap: между столбцами и строками */
     int grow, shrink, basis, order;           /* flex-grow и flex-shrink ×100; flex-basis (−1 — auto); order */
     char gcols[160];                          /* grid-template-columns */
     uint8_t flt, clr, rel;                    /* float ('l', 'r'); clear (1 левые, 2 правые, 3 оба); position: relative */
+    uint8_t flt_set;                          /* float сказан в CSS (и none) — атрибут align картинки уже не действует */
     uint8_t lset, rset;                       /* left, right заданы */
     int lv, rv, dx;                           /* left, right; сдвиг position: relative по горизонтали */
     uint8_t tset, bset;                       /* top, bottom заданы */
@@ -781,6 +913,7 @@ static void css_border(const char *v, int mask) {
         else if (is(w, "medium")) width = 3;
         else if (is(w, "thick")) width = 5;
         else if (css_len(w, -1, &x) == 1) width = x < 0 ? 0 : x > 15 ? 15 : x;
+        else if (css_clear(w, cur_fg)) c = BC_CLEAR;
         else css_rgb(w, cur_fg, doc_bg(), &c);
     }
     if (style == 1) bs.bstyle = 1;
@@ -885,11 +1018,14 @@ static void css_box(const char *css, int blockish) {
     if (get(css, "border-color", v, sizeof(v))) {
         char w[48];
         const char *p = v;
-        if (word(&p, w, sizeof(w)) && css_rgb(w, cur_fg, doc_bg(), &c)) bx.bc = c;
+        if (word(&p, w, sizeof(w)) && css_clear(w, cur_fg)) bx.bc = BC_CLEAR;
+        else if (*w && css_rgb(w, cur_fg, doc_bg(), &c)) bx.bc = c;
     }
     for (int k = 0; k < 4; k++) {                    /* цвет у рамки один — какой сказали последним */
         snprintf(nm, sizeof(nm), "border-%s-color", side_name[k]);
-        if (get(css, nm, v, sizeof(v)) && css_rgb(v, cur_fg, doc_bg(), &c)) bx.bc = c;
+        if (!get(css, nm, v, sizeof(v))) continue;
+        if (css_clear(v, cur_fg)) bx.bc = BC_CLEAR;
+        else if (css_rgb(v, cur_fg, doc_bg(), &c)) bx.bc = c;
     }
     if (get(css, "border-radius", v, sizeof(v))) {
         char w[48];
@@ -977,6 +1113,10 @@ static int weight_bold(const char *w) {
 
 /* font: [наклон] [жирность] размер[/интервал] шрифт — жирность и размер (сокращение сбрасывает
  * жирность в normal, если её не сказали, — как у браузеров). */
+/* Начертание родителя элемента, чьи правила сейчас читаются (apply_style): от него считаются em,
+ * % и smaller/larger у font-size. Своё e->face тут уже не годится — у <h2> оно заранее заголовок
+ * (размер тега по умолчанию), и «1.31em» дало бы ещё крупнее. */
+static unsigned parent_face = FACE_BODY;
 static void css_font(st_t *e, const char *v) {
     if (is(v, "inherit") || is(v, "initial") || is(v, "unset") || is(v, "revert")) return;
     char w[64];
@@ -987,7 +1127,7 @@ static void css_font(st_t *e, const char *v) {
         if (is(w, "normal") || is(w, "italic") || is(w, "oblique") || is(w, "small-caps")) continue;
         char *sl = strchr(w, '/');
         if (sl) *sl = 0;
-        int f = css_face(w, e->face);
+        int f = css_face(w, parent_face);
         if (f < 0) return;                            /* «font: menu» и подобное — не трогать */
         e->face = (uint8_t)f;
         break;                                        /* дальше — имя шрифта */
@@ -1092,8 +1232,13 @@ static int apply_decls(st_t *e, const char *css, int blockish) {
     if (get(css, "display", v, sizeof(v))) {
         /* скрыт ли тег, решает последнее display (style="display:block" тега главнее правила
          * «div{display:none}» — так Google прячет всё, кроме своей надписи в <noscript>) */
-        last_display = is(v, "none") ? 'n' : !strncmp(v, "inline", 6) || is(v, "contents") ? 'i' : is(v, "list-item") ? 'l' : 'b';
-        bs.disp = (uint8_t)(is(v, "flex") ? 'f' : is(v, "grid") ? 'g' : 0);
+        /* inline-table — как блок: ячейкам нужна своя строка (Bootstrap: поле поиска с кнопкой —
+         * .input-group { display: inline-table } в .navbar-form, одно в своей форме) */
+        last_display = is(v, "none") ? 'n' : (!strncmp(v, "inline", 6) && !is(v, "inline-table")) || is(v, "contents") ? 'i'
+                       : is(v, "list-item") ? 'l' : 'b';
+        bs.disp = (uint8_t)(is(v, "flex") ? 'f' : is(v, "grid") ? 'g' :
+                            is(v, "table") || is(v, "inline-table") || is(v, "table-row") ? 't' : 0);
+        bs.trow = (uint8_t)is(v, "table-row");
         if (last_display == 'n') return 0;
     }
     if (get(css, "visibility", v, sizeof(v)) && (is(v, "hidden") || is(v, "collapse"))) return 1;
@@ -1107,8 +1252,24 @@ static int apply_decls(st_t *e, const char *css, int blockish) {
     if (get(css, "color", v, sizeof(v)) && css_rgb(v, e->fg, e->bg ? e->bg : doc_bg(), &c)) e->fg = cur_fg = c;
     for (int k = 0; k < 2; k++) {                     /* background, потом background-color (главнее) */
         if (!get(css, k ? "background-color" : "background", v, sizeof(v)) || !css_bg(v, &c, &none)) continue;
-        if (!blockish) e->bg = none ? 0 : c;
+        if (!blockish) { e->bg = none ? 0 : c; bg_clear = none; }
         else { bx.bg = none ? 0 : c; bs.bg = !none; }   /* блок — фоном коробки (open_box) */
+    }
+    if (blockish == 1) {                              /* фон-картинка — у блоков (коробка CSS) */
+        /* правила приходят сюда по очереди каскада (run_decls): адрес, размер и место — каждое из
+         * своего правила (у карточек bbb: размер и место — в «.pic», адрес — в style тега) */
+        static char bv[URL_MAX + 128];
+        char sv[64];
+        if (get(css, "background-image", bv, sizeof(bv))) {
+            bg_url(bv, bs.bgimg, sizeof(bs.bgimg));      /* none, градиент — картинки нет */
+        } else if (get(css, "background", bv, sizeof(bv))) {
+            /* сокращение задаёт всё сразу: без url() — картинки нет («background: #fff»), место и
+             * размер — заново */
+            memset(&bs.bgsp, 0, sizeof(bs.bgsp));
+            if (bg_url(bv, bs.bgimg, sizeof(bs.bgimg))) bg_short(bv, &bs.bgsp);
+        }
+        if (get(css, "background-size", sv, sizeof(sv))) bg_size(sv, &bs.bgsp);
+        if (get(css, "background-position", sv, sizeof(sv))) bg_pos(sv, &bs.bgsp);
     }
     css_box(css, blockish);
     if (get(css, "font", v, sizeof(v))) css_font(e, v);
@@ -1123,7 +1284,7 @@ static int apply_decls(st_t *e, const char *css, int blockish) {
         if (strstr(v, "line-through")) e->flags |= PAGE_STRIKE;
     }
     if (get(css, "font-size", v, sizeof(v))) {
-        int f = css_face(v, e->face);
+        int f = css_face(v, parent_face);
         if (f >= 0) e->face = (uint8_t)f;
     }
     if (blockish == 1 && get(css, "text-align", v, sizeof(v))) set_align(v);
@@ -1136,6 +1297,7 @@ static int apply_decls(st_t *e, const char *css, int blockish) {
         if (blockish == 1) pre = !strncmp(v, "pre", 3) || is(v, "break-spaces");
         e->nowrap = is(v, "nowrap") || is(v, "pre");                /* наследуется: копия записи стека */
     }
+    if (get(css, "text-overflow", v, sizeof(v))) e->ell = strstr(v, "ellipsis") != NULL;
     /* flex и grid: контейнер (направление, перенос, промежутки, свободное место) и ребёнок */
     if (get(css, "flex-direction", v, sizeof(v))) bs.fcol = !strncmp(v, "column", 6);
     if (get(css, "flex-wrap", v, sizeof(v))) bs.wrap = !strncmp(v, "wrap", 4);
@@ -1182,7 +1344,10 @@ static int apply_decls(st_t *e, const char *css, int blockish) {
     if (get(css, "transform", v, sizeof(v))) css_translate(v);
     if (get(css, "left", v, sizeof(v)) && css_len(v, len_wbase, &x) == 1) { bs.lset = 1; bs.lv = x; }
     if (get(css, "right", v, sizeof(v)) && css_len(v, len_wbase, &x) == 1) { bs.rset = 1; bs.rv = x; }
-    if (get(css, "float", v, sizeof(v))) bs.flt = (uint8_t)(is(v, "left") || is(v, "inline-start") ? 'l' : is(v, "right") || is(v, "inline-end") ? 'r' : 0);
+    if (get(css, "float", v, sizeof(v))) {
+        bs.flt = (uint8_t)(is(v, "left") || is(v, "inline-start") ? 'l' : is(v, "right") || is(v, "inline-end") ? 'r' : 0);
+        bs.flt_set = 1;
+    }
     if (get(css, "clear", v, sizeof(v)))
         bs.clr = (uint8_t)(is(v, "left") || is(v, "inline-start") ? 1 : is(v, "right") || is(v, "inline-end") ? 2 : is(v, "both") ? 3 : 0);
     if (get(css, "aspect-ratio", v, sizeof(v))) {    /* «3/2», «1.5», «auto 3/2» */
@@ -1268,10 +1433,23 @@ static void open_box(st_t *e) {
     bx.h = h;
     int any = bx.bt || bx.br || bx.bb || bx.bl || bx.pt || bx.pb || bx.pl || bx.pr || bx.w || bx.maxw || bx.h ||
               bx.radius || bx.mt || bx.mb || bx.ml || bx.mr || (bx.auto_l && bx.auto_r && (bx.w || bx.maxw)) ||
-              (bs.bg && bx.bg);
+              (bs.bg && bx.bg) || bs.bgimg[0];
     if (any) {
         if (!bs.bg) bx.bg = 0;
+        if (bx.bc == BC_CLEAR) bx.bc = bx.bg ? bx.bg : doc_bg();   /* прозрачная рамка — цветом под ней */
         if (!e->css && doc_cssbox_begin(&bx)) e->css = 1;
+    }
+    /* фон-картинка: место — сейчас (раньше картинок внутри: рисуется под ними), прямоугольник —
+     * когда коробка закроется (pop_one); data: в CSS — пока нет */
+    if (e->css && bs.bgimg[0] && strncmp(bs.bgimg, "data:", 5) && !doc_measuring()) {
+        static char abs_u[URL_MAX];
+        if (url_resolve(base, bs.bgimg, abs_u, sizeof(abs_u))) {
+            int id = image_back_add(abs_u, &bs.bgsp);
+#ifdef TSAFARI_HOST
+            if (getenv("TSAFARI_BGLOG")) printf("bg %s: size %c %d%s x %d%s pos %d%s %d%s\n", abs_u, bs.bgsp.size ? bs.bgsp.size : '0', bs.bgsp.w, bs.bgsp.wp ? "%" : "", bs.bgsp.h, bs.bgsp.hp ? "%" : "", bs.bgsp.x, bs.bgsp.xp ? "%" : "", bs.bgsp.y, bs.bgsp.yp ? "%" : "");
+#endif
+            if (id >= 0) { e->bgid = id; e->bgmark = doc_text_count(); }
+        }
     }
     if (bs.indent > 0) doc_hang(-bs.indent);           /* первая строка — правее (text-indent) */
 }
@@ -1286,6 +1464,7 @@ static int flex_child = -1;              /* номер в стеке, где в�
 static struct {
     uint8_t grid, wrap, just, clip;      /* grid; перенос строк; justify-content (0 start, 1 center, 2 end,
                                           * 3 space-between, 4 space-around, 5 space-evenly); лишнее не видно */
+    uint8_t table;                       /* CSS-таблица (display: table, inline-table, table-row) */
     int cgap, rgap;                      /* промежутки между столбцами и строками */
     char cols[160];                      /* grid-template-columns */
 } fc;
@@ -1380,12 +1559,14 @@ static int apply_style(st_t *e, const char *name, const char *a, size_t n, int b
     static const char *list[96];
     last_display = 0;
     margin_left = 0;
+    bg_clear = 0;
     box_reset();
     cls[0] = id[0] = 0;
     if (a) { attr(a, n, "class", cls, sizeof(cls)); attr(a, n, "id", id, sizeof(id)); }
     css_el_make(&e->el, name, cls, id);
     /* родители — открытые теги под этим (сам тег, если он уже на стеке, родителем не считается) */
     int idx = e >= stk && e < stk + sn ? (int)(e - stk) : sn;
+    parent_face = idx > 0 ? stk[idx - 1].face : FACE_BODY;   /* em и % у font-size — от родителя */
     int vd = root_depth >= 0 ? root_depth : idx + 2;  /* глубина переменных: html 0, body 1, теги — с 2 */
     const css_el_t *anc[ST_MAX + 2];
     int na = 0, wb = doc_measuring() ? -1 : doc_width(), hb = -1, wstop = 0, hstop = 0;
@@ -1450,6 +1631,7 @@ static int apply_style(st_t *e, const char *name, const char *a, size_t n, int b
         bx.auto_l = bx.auto_r = 0;
     }
     e->ovh = bs.ovh;
+    if (bs.ovh) e->clip = 1;                          /* текст внутри — обрезается по краю (с nowrap) */
     if (!blockish) {                                  /* поля и рамка строчного тега — место слева и справа */
         int l = margin_left + bx.pl + (bs.bstyle == 1 ? bx.bl : 0), r = e->mr + bx.pr + (bs.bstyle == 1 ? bx.br : 0);
         margin_left = l > 64 ? 64 : l;
@@ -1488,12 +1670,18 @@ static int apply_style(st_t *e, const char *name, const char *a, size_t n, int b
     /* колонка flex (column) с align-items: center — её дети по середине строки */
     if (blockish == 1 && !hidden && bs.disp == 'f' && bs.fcol && bs.aic) doc_align(DOC_CENTER);
     /* flex (в строку) или grid со столбцами: детей этого блока разложит рядом flex_row — parse или
-     * render_range увидят flex_at сразу после того, как тег открыт */
+     * render_range увидят flex_at сразу после того, как тег открыт.
+     * CSS-таблица (display: table, inline-table, table-row) — так же: её ячейки (table-cell) — рядом,
+     * каждая шириной из CSS (проценты — от таблицы) или по содержимому; строки (table-row) —
+     * во всю ширину, друг под другом (перенос, как flex-wrap), ячейки строки — рядом. Столбцы
+     * разных строк не выравниваются друг с другом и ячейки не растягиваются на свободное место —
+     * этого у нас нет. */
     if (blockish == 1 && !hidden && idx == sn - 1 && flex_depth < NEST_MAX &&
-        ((bs.disp == 'f' && !bs.fcol) || (bs.disp == 'g' && bs.gcols[0]))) {
+        ((bs.disp == 'f' && !bs.fcol) || (bs.disp == 'g' && bs.gcols[0]) || bs.disp == 't')) {
         flex_at = idx;
         fc.grid = bs.disp == 'g';
-        fc.wrap = bs.wrap;
+        fc.table = bs.disp == 't';
+        fc.wrap = bs.disp == 't' ? 0 : bs.wrap;            /* ячейки таблицы — в одну строку */
         fc.just = bs.just;
         fc.cgap = bs.cgap;
         fc.rgap = bs.rgap;
@@ -1623,7 +1811,7 @@ static const char *content_text(const uint8_t *p, size_t n, int keep) {
         }
         raw[r++] = (char)p[i];
     }
-    size_t len = entities_decode(out, charset_to_utf8(cs, (const uint8_t *)raw, r, out));
+    size_t len = html_entities_decode(out, charset_to_utf8(cs, (const uint8_t *)raw, r, out));
     if (!keep) {                                       /* пробелы подряд — один, по краям — прочь */
         size_t o = 0;
         int sp = 0;
@@ -1641,12 +1829,22 @@ static const char *content_text(const uint8_t *p, size_t n, int keep) {
 }
 
 /* Поставить элемент в строку (видимый) или только завести (скрытый). */
+static void place_widget(int id, int x, int y);    /* ниже: встроенный блок — на место */
+static absg_t ctl_abs;                   /* css_look: элемент формы — position: absolute (как у картинки) */
 static void control(const form_new_t *f, int hidden) {
     int w, h, d, max_w = doc_width();
     form_size(f, max_w, &w, &h, &d);
     int id = doc_measuring() ? -1 : form_add(f, max_w);
     if (hidden) return;
     shown_n = 1;
+    if (ctl_abs.ok) {                             /* вне потока: места в строке не занимает */
+        if (!doc_measuring() && id >= 0) {
+            int x, y;
+            abs_where(&ctl_abs, w, h, &x, &y);
+            place_widget(id, x, y);
+        }
+        return;
+    }
     inline_space();
     doc_inline(w, h, d, id);
 }
@@ -1667,6 +1865,11 @@ static int css_look(form_new_t *f, const char *name, const char *a, size_t n) {
     look_tt = probe.tt;
     if (bs.h && bx.h > 0) f->height = bx.h;
     if (bs.bnone) f->no_border = 1;
+    if (bg_clear) f->no_fill = 1;
+    ctl_abs = abs_g;                                  /* position: absolute — место и размер от блока отсчёта */
+    ctl_abs.ok = ctl_abs.ok && sn != flex_child;
+    if (ctl_abs.ok && ctl_abs.w > 0) f->width = ctl_abs.w;
+    if (ctl_abs.ok && ctl_abs.h > 0) f->height = ctl_abs.h;
     return hidden;
 }
 
@@ -1703,6 +1906,8 @@ static void input_tag(const char *a, size_t n) {
     if (attr(a, n, "size", v, sizeof(v))) f.size = num(v);
     if (attr(a, n, "maxlength", v, sizeof(v))) f.maxlength = num(v);
     if (f.type == FC_IMAGE) f.label = attr(a, n, "alt", alt, sizeof(alt)) && alt[0] ? alt : "Submit";
+    /* value есть, но пустой — подпись кнопки пустая (как у браузеров; «Submit» — когда value нет) */
+    if (f.value && !f.value[0] && (f.type == FC_SUBMIT || f.type == FC_RESET || f.type == FC_BUTTON)) f.empty_label = 1;
     int hidden = css_look(&f, "input", a, n);
     if (f.value && (f.type == FC_SUBMIT || f.type == FC_BUTTON || f.type == FC_RESET)) tt_apply(value, strlen(value), look_tt);
     control(&f, f.type == FC_HIDDEN || hidden);
@@ -1811,6 +2016,9 @@ NOINLINE static void button_tag(const char *a, size_t an, const uint8_t *content
     snprintf(label, sizeof(label), "%s", content_text(content, n, 0));
     if (!label[0] && !attr(a, an, "aria-label", label, sizeof(label))) attr(a, an, "title", label, sizeof(label));
     f.label = label[0] ? label : NULL;
+    /* ни текста, ни подписи (внутри только значок шрифта, как лупа Glyphicons у Bootstrap) — кнопка
+     * пустая, как у браузеров; «Submit» — только у <input type=submit> без value */
+    if (!label[0]) f.empty_label = 1;
     f.disabled = attr(a, an, "disabled", v, sizeof(v));
     int hidden = css_look(&f, "button", a, an);
     tt_apply(label, strlen(label), look_tt);
@@ -1923,6 +2131,17 @@ static void image_tag(const char *a, size_t n) {
     st_t probe = *top();
     if (apply_style(&probe, "img", a, n, 0)) return;  /* скрыта правилами CSS */
     int flt = bs.flt, ml = margin_left, mr = probe.mr;
+    /* Старый HTML: <img align=left> (right) — картинка у края, текст обтекает её, как float (так
+     * её показывают браузеры; float из CSS главнее атрибута). hspace и vspace — поля слева-справа и
+     * сверху-снизу (логотип vtrd.in: «hspace=10 align=left», список разделов — справа от него). */
+    char al[12];
+    if (!bs.flt_set && attr(a, n, "align", al, sizeof(al))) {
+        for (char *c = al; *c; c++) *c = (char)lower((unsigned char)*c);   /* align=LEFT — тоже */
+        flt = is(al, "left") ? 'l' : is(al, "right") ? 'r' : 0;
+    }
+    int hs = size_attr(a, n, "hspace", 0), vs = size_attr(a, n, "vspace", 0);
+    if (hs > 0 && !ml) ml = hs;
+    if (hs > 0 && !mr) mr = hs;
     static absg_t ag;                                 /* position: absolute — место от блока отсчёта (static: стек) */
     ag = abs_g;
     ag.ok = ag.ok && sn != flex_child;
@@ -1973,8 +2192,8 @@ static void image_tag(const char *a, size_t n) {
     if (flt && !doc_measuring() && sn != flex_child && id >= 0) {
         int x, y;
         doc_float_place(w + ml + mr, flt == 'r', &x, &y);
-        place_widget(id, x + ml, y);
-        doc_float_add(x, y, w + ml + mr, h + 4, flt == 'r');
+        place_widget(id, x + ml, y + vs);
+        doc_float_add(x, y, w + ml + mr, h + 4 + 2 * vs, flt == 'r');
         return;
     }
     inline_space();
@@ -2390,7 +2609,7 @@ NOINLINE static void table(const uint8_t *b, size_t ta, size_t tb, const char *a
         if (te->bg) css_tbg = (int32_t)te->bg;
         te->bg = 0;
         if (bs.w && bx.w > 0) css_w = bx.w;
-        if (bs.bstyle == 1) { tbw[0] = bx.bt; tbw[1] = bx.br; tbw[2] = bx.bb; tbw[3] = bx.bl; tbc = bx.bc; }
+        if (bs.bstyle == 1) { tbw[0] = bx.bt; tbw[1] = bx.br; tbw[2] = bx.bb; tbw[3] = bx.bl; tbc = bx.bc == BC_CLEAR ? doc_bg() : bx.bc; }
         collapse = bs.collapse;
         if (bs.bspace_set) css_space = bs.bspace;
     }
@@ -2419,7 +2638,7 @@ NOINLINE static void table(const uint8_t *b, size_t ta, size_t tb, const char *a
         c->bt = c->br = c->bb = c->bl = 0;
         if (bs.bstyle == 1) {
             c->bt = (uint8_t)bx.bt; c->br = (uint8_t)bx.br; c->bb = (uint8_t)bx.bb; c->bl = (uint8_t)bx.bl;
-            c->bc = bx.bc;
+            c->bc = bx.bc != BC_CLEAR ? bx.bc : bs.bg && bx.bg ? bx.bg : doc_bg();   /* прозрачная — цветом под ней */
             if (collapse && c->col) c->bl = 0;
             if (collapse && c->row) c->bt = 0;
         }
@@ -2595,6 +2814,7 @@ typedef struct {
     uint16_t an;
     char tag[16];
     uint8_t ctl;                         /* поле или кнопка формы: во всю ширину колонки */
+    uint8_t trow;                        /* display: table-row — строка CSS-таблицы */
 } fitem_t;
 static int rr_anon;                      /* следующая обёртка render_range — невидима для селекторов */
 static int scan_quiet;                   /* flex_scan только смотрит (cb_settle): <link> и <script> не трогать */
@@ -2744,6 +2964,7 @@ NOINLINE static int flex_scan(const uint8_t *b, size_t n, fitem_t *it, int measu
             }
             int pad = bs.border_box ? 0 : bx.pl + bx.pr + (bs.bstyle == 1 ? bx.bl + bx.br : 0);
             int want = bs.basis >= 0 ? bs.basis : bs.w ? bx.w : -1;
+            f->trow = bs.trow;
             if (want >= 0) {
                 if (bs.maxw && want > bx.maxw) want = bx.maxw;
                 f->basis = want + pad + bx.ml + bx.mr;
@@ -2765,6 +2986,11 @@ NOINLINE static void flex_row(const uint8_t *b, size_t n) {
     typeof(fc) *cp = &mem->c;
     int k = 0, avail = doc_width(), measuring = doc_measuring(), al = doc_get_align();
     k = flex_scan(b, n, it, measuring, FX_MAX);
+    /* CSS-таблица со строками (table-row) — строки друг под другом, как блоки: каждая сама
+     * раскладывает свои ячейки рядом (она тоже «таблица» для flex_row) */
+    if (cp->table)
+        for (int q = 0; q < k; q++)
+            if (it[q].trow) { ts_core->free(mem); parse(b, n); return; }
     int kall = k;                                     /* абсолютные — в конце (сортировка ниже), не колонки */
     for (int q = 1; q < k; q++) {                     /* order — устойчиво, вставками */
         fitem_t v = it[q];
@@ -2776,7 +3002,9 @@ NOINLINE static void flex_row(const uint8_t *b, size_t n) {
     /* 2) мерки содержимого — у тех, чья ширина не задана (при измерении таблицы — у всех) */
     for (int q = 0; q < k; q++) {
         fitem_t *f = &it[q];
-        if (!measuring && (cp->grid || f->basis >= 0)) { f->max = f->basis > 0 ? f->basis : 0; f->min = 1; continue; }
+        /* ячейке таблицы мерка нужна всегда: уже своего содержимого она не бывает (кнопка поиска
+         * Bootstrap — «width: 1%», а в ней кнопка) */
+        if (!measuring && !cp->table && (cp->grid || f->basis >= 0)) { f->max = f->basis > 0 ? f->basis : 0; f->min = 1; continue; }
         doc_measure_push();
         doc_frame_push(0, 30000, 0, 0);
         flex_item(b, f, al);
@@ -2810,6 +3038,7 @@ NOINLINE static void flex_row(const uint8_t *b, size_t n) {
         } else {
             for (int q = start; q < k; q++) {
                 int hyp = it[q].basis >= 0 ? it[q].basis : it[q].max;
+                if (cp->table && hyp < it[q].min) hyp = it[q].min;     /* ячейка — не уже содержимого */
                 if (hyp > avail && it[q].basis < 0) hyp = avail;
                 if (cp->wrap && cnt && sum + cp->cgap + hyp > avail) break;
                 it[q].w = hyp;
@@ -3171,6 +3400,7 @@ static void parse(const uint8_t *b, size_t n) {
     html_host_parsed += n;
 #endif
     while (i < n) {
+        ts_yield();                                            /* долгая раскладка — сторожевой таймер (ts.h) */
         if (skip_until[0]) {                                   /* до </script> и подобных */
             i = find_close(b, n, i, skip_until);
             skip_until[0] = 0;
@@ -3391,9 +3621,17 @@ void html_end(void) {
 }
 
 /* Страница без своего содержимого, которую строит программа JavaScript (как zxart.ee: в ней
- * только <app-root></app-root> и скрипты): вместо пустого листа — объяснение. Вид — дизайн
- * Codex, кадр 11a «This page needs JavaScript»; кнопок JS-службы пока нет — службы ещё нет. */
+ * только <app-root></app-root> и скрипты). Пока скрипты идут, на экране страница как есть —
+ * пустая, и вращается глобус (как у настольного браузера): пугать человека нечем, скрипты
+ * обычно справляются. Объяснение — только когда они не справились (html_js_note из app.c):
+ * не хватило памяти, ошибки, страницу не построили. Вид — дизайн Codex, кадр 11a «This page
+ * needs JavaScript». */
+static int js_note;                      /* HTML_JS_… */
+static int js_shown;                     /* последняя раскладка показала эту страницу */
+void html_js_note(int state) { js_note = state; }
+int html_js_shown(void) { return js_shown; }
 static void js_page(const char *url) {
+    js_shown = 1;
     reset_links();
     form_clear();
     image_clear();
@@ -3402,11 +3640,14 @@ static void js_page(const char *url) {
     doc_begin(COL_BG);
     doc_style_t cap = {COL_LINK, 0, 0, -1, FACE_CAPTION}, h = {COL_TEXT, 0, 0, -1, FACE_H1},
                 m = {COL_DIM, 0, 0, -1, FACE_BODY}, t = {COL_TEXT, 0, 0, -1, FACE_BODY};
-    static const char *const lines[] = {
-        "This site builds its pages with a JavaScript program,",
-        "and TSafari does not run JavaScript.",
-        "A JS service that prepares readable pages is planned.",
+    static const char *const notes[] = {
+        "",                                                         /* HTML_JS_RUNNING — не показывается */
+        "Its JavaScript program does not fit in TSafari's memory.",
+        "Its scripts stopped with errors (they are in the ESP log).",
+        "Its scripts ran but did not build a page.",
     };
+    const char *lines[] = {"This site builds its pages with a JavaScript program.",
+                           notes[js_note > 0 && js_note < 4 ? js_note : HTML_JS_EMPTY]};
     doc_indent(48);                                    /* подпись — правее глобуса, как у Codex */
     static const char cap_text[] = "PAGE / JAVASCRIPT", head[] = "This page needs JavaScript";
     doc_text(cap_text, sizeof(cap_text) - 1, &cap);
@@ -3429,10 +3670,14 @@ static void js_page(const char *url) {
 }
 
 void html_render(const uint8_t *b, size_t n, const char *content_type, const char *url) {
+    js_shown = 0;
     html_begin();
     html_part(b, n, content_type, url, -1);
-    if (!shown_n && script_n) { js_page(url); return; }
-    html_end();
+    if (!shown_n && script_n) {                  /* видимого нет, есть скрипты — страницу строят они */
+        js_shown = 1;
+        if (js_note != HTML_JS_RUNNING) { js_page(url); return; }   /* не справились — объяснить */
+    }
+    html_end();                                  /* иначе (и пока скрипты идут) — страница как есть */
 }
 
 /* Страница ошибки: заголовок, адрес, подробности и подсказка, что делать дальше. */

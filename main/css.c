@@ -162,6 +162,43 @@ static uint32_t pool_put(rs_t *rs, const char *s, size_t n) {
     return at;
 }
 
+/* Адрес таблицы стилей, которая сейчас разбирается (sheet): относительный адрес в url() её правил —
+ * от неё, а не от страницы (bootstrap.css с cdn: «url(../fonts/x.woff)»). */
+static const char *decl_base;
+
+/* url(относительный) в s (k байт) → url("абсолютный") в t. Сколько байт вышло. */
+static size_t urls_abs(const char *s, size_t k, char *t) {
+    size_t o = 0;
+    for (size_t i = 0; i < k;) {
+        if (i + 4 <= k && !memcmp(s + i, "url(", 4)) {
+            size_t p = i + 4;
+            while (p < k && s[p] == ' ') p++;
+            char q = p < k && (s[p] == '"' || s[p] == '\'') ? s[p++] : ')';
+            size_t a = p;
+            while (p < k && s[p] != q) p++;
+            size_t z = p;
+            if (q == ')') while (z > a && s[z - 1] == ' ') z--;
+            while (p < k && s[p] != ')') p++;
+            size_t e = p < k ? p + 1 : k;
+            static char rel[URL_MAX], abs_u[URL_MAX];
+            size_t rl = z - a < sizeof(rel) - 1 ? z - a : sizeof(rel) - 1;
+            memcpy(rel, s + a, rl);
+            rel[rl] = 0;
+            if (rl && rel[0] != '#' && strncmp(rel, "data:", 5) && url_resolve(decl_base, rel, abs_u, sizeof(abs_u))) {
+                o += (size_t)snprintf(t + o, URL_MAX + 8u, "url(\"%s\")", abs_u);   /* место — с запасом (decl_put) */
+                i = e;
+                continue;
+            }
+            memcpy(t + o, s + i, e - i);          /* data:, #id, не разобрался — как был */
+            o += e - i;
+            i = e;
+            continue;
+        }
+        t[o++] = s[i++];
+    }
+    return o;
+}
+
 /* Свойства правила — в pool: комментарии прочь, переводы строк и табуляции — пробелами. */
 static uint32_t decl_put(rs_t *rs, const char *d, size_t n) {
     if (!rs->pn) rs->pn = 1;
@@ -185,6 +222,20 @@ static uint32_t decl_put(rs_t *rs, const char *d, size_t n) {
     if (s) memmove(o, o + s, k - s);
     k -= s;
     o[k] = 0;
+    if (decl_base && strstr(o, "url(")) {             /* относительные url() — от адреса таблицы */
+        size_t cnt = 0;
+        for (const char *p = o; (p = strstr(p, "url(")) != NULL; p += 4) cnt++;
+        char *t = ts_alloc(k + cnt * (URL_MAX + 8u) + 1u);
+        if (t) {
+            size_t tk = urls_abs(o, k, t);
+            if (rs->pn + tk + 1 <= POOL_MAX && grow((void **)&rs->pool, &rs->pcap, at + (unsigned)tk + 1, 1, 16384)) {
+                memcpy(rs->pool + at, t, tk);
+                rs->pool[at + tk] = 0;
+                k = tk;
+            }
+            ts_core->free(t);
+        }
+    }
     rs->pn += (unsigned)k + 1;
     return at;
 }
@@ -509,6 +560,8 @@ static void import_rule(const char *s, size_t n, const char *base, int part) {
  * @-блоки (@font-face, @keyframes, @page…) — мимо. */
 static void sheet(rs_t *rs, const char *s, size_t n, const char *base, int part, int lvl) {
     size_t i = 0;
+    const char *base_was = decl_base;
+    decl_base = base;
     while (i < n) {
         char c = s[i];
         if (sp((unsigned char)c) || c == '}' || c == ';') { i++; continue; }
@@ -551,6 +604,7 @@ static void sheet(rs_t *rs, const char *s, size_t n, const char *base, int part,
         if (!nested && d1 > i + 1) rules_add(rs, s + a, i - a, s + i + 1, d1 - (i + 1), part);
         i = e;
     }
+    decl_base = base_was;
 }
 
 void css_doc_reset(void) { rs_reset(&doc_rs); }
@@ -889,6 +943,22 @@ static int expand(const char *v, size_t n, char *out, size_t cap, size_t *o, int
                 return 0;
             }
             i = q + 1;
+            continue;
+        }
+        if (i + 4 <= n && low((unsigned char)v[i]) == 'u' && low((unsigned char)v[i + 1]) == 'r' &&
+            low((unsigned char)v[i + 2]) == 'l' && v[i + 3] == '(') {
+            /* url(…) — как есть: в адресе регистр букв значим («Screens/Demo.png» ≠ «screens/demo.png») */
+            size_t q = i + 4;
+            char qu = 0;
+            for (; q < n; q++) {
+                if (qu) { if (v[q] == qu) qu = 0; }
+                else if (v[q] == '"' || v[q] == '\'') qu = v[q];
+                else if (v[q] == ')') break;
+            }
+            size_t e = q < n ? q + 1 : n;
+            for (size_t k = i; k < e; k++)
+                if (*o + 1 < cap) out[(*o)++] = k < i + 4 ? "url("[k - i] : v[k];
+            i = e;
             continue;
         }
         char c = sp((unsigned char)v[i]) ? ' ' : (char)low((unsigned char)v[i]);

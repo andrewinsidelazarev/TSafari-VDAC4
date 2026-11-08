@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Фон-картинки</title>
+<link rel="stylesheet" href="css/bg.css">
+<style>
+/* как карточки bbb.retroscene.org: пустой блок, картинка — фоном 200 точек по ширине, по середине */
+.pic { background-repeat: no-repeat; background-position: center; height: 150px; width: 100%; background-size: 200px auto; }
+.card { width: 300px; border: 1px solid #ccc; }
+</style></head>
+<body>
+<h2>Фон-картинки CSS</h2>
+<div class="card"><a href="index.html"><div class="pic" style="background-image:url('photo.jpg')"></div></a>карточка</div>
+<p>cover, сокращение background:</p>
+<div style="width:200px;height:100px;background:#333 url(wide.jpg) center / cover no-repeat"></div>
+<p>из внешней таблицы (адрес от неё):</p>
+<div class="ext"></div>
+<p>с текстом внутри — картинка не рисуется (закрыла бы текст), остаётся цвет:</p>
+<div style="width:300px;background:#cde url(gray.png)">Текст поверх фона</div>
+</body></html>

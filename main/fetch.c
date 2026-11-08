@@ -112,16 +112,16 @@ static void run_one(void) {
     /* Длина известна — память сразу на весь файл, одним куском. Рост по STEP (64 КБ) у большого
      * файла на каждом шаге держит старый и новый буферы разом (WebP 1,2 МБ — до 2,4 МБ на миг) и
      * дробит PSRAM: на плате 07.11 такая картинка срывалась («not loaded»). */
-    if (res.total && res.total <= limit && res.total > cap && !res.length) {
+    if (res.total && res.total <= limit && res.total >= cap && !res.length) {
         if (res.body) ts_core->free(res.body);                /* прежний буфер — не копировать */
-        res.body = ts_alloc(res.total);
-        cap = res.body ? res.total : 0;
+        res.body = ts_alloc(res.total + 1);                   /* +1 — ноль после данных (fetch_take_body) */
+        cap = res.body ? res.total + 1 : 0;
     }
     uint32_t last = ts_core->millis();
     for (;;) {
         if (cancel_flag || !__atomic_load_n(&ts_running, __ATOMIC_ACQUIRE)) break;
+        if (res.total && res.length >= res.total) break;      /* всё, что обещал сервер, пришло */
         if (res.length == cap) {
-            if (res.total && res.length >= res.total) break;  /* всё, что обещал сервер, пришло */
             if (cap >= limit) {
                 snprintf(res.error, sizeof(res.error), "%s", limit == FETCH_LIMIT ? "page is larger than 2 MB" : "file is larger than 4 MB");
                 break;
@@ -530,10 +530,13 @@ uint8_t *fetch_take_body(void) {
     ts_core->mutex_unlock(mutex);
     /* Память росла кусками по STEP (64 КБ): значок SVG в 150 байт держал бы 64 КБ, а картинки и
      * кэши считают память по длине файла — на странице с десятками картинок PSRAM кончалась
-     * (стенд 07.11: 80 значков — 6 МБ, картинки «not loaded»). Отдаём ровно по длине. */
-    if (b && n < had) {
-        uint8_t *q = ts_core->realloc(b, n ? n : 1);
-        if (q) b = q;
+     * (стенд 07.11: 80 значков — 6 МБ, картинки «not loaded»). Отдаём по длине — и ещё байт: ноль
+     * после данных (тексту скрипта он нужен — QuickJS читает до нуля, js_script_take). */
+    if (b && n + 1 != had) {
+        uint8_t *q = ts_core->realloc(b, n + 1);
+        if (q) { b = q; had = n + 1; }
+        else if (had <= n) { ts_core->free(b); return NULL; }   /* места под ноль нет — как не пришло */
     }
+    if (b) b[n] = 0;
     return b;
 }

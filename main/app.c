@@ -32,6 +32,8 @@
 #include "charset.h"
 #include "html.h"
 #include "css.h"
+#include "js.h"
+#include "start.h"
 #include "form.h"
 #include "image.h"
 #include "url.h"
@@ -51,6 +53,47 @@ static ft_dl_t *dl;                      /* дисплей-лист, котор�
 #define MOUSE_GAIN 2                     /* курсор движется вдвое быстрее мыши: экран большой */
 
 void *ts_alloc(size_t bytes) { return ts_core->alloc(bytes, ZM_MEM_PSRAM); }
+
+/* Можно ли сейчас подробную строку журнала (ts_log_detail, ts.h). Журнал прошивки хранится во
+ * flash ESP: не чаще раза в секунду задача сети переписывает в LittleFS кусок файла журнала, и
+ * пока идёт запись, кэш flash выключен — стоит и браузер (его код и данные в PSRAM). Чем больше
+ * строк, тем чаще и дольше такие записи. 08.11 пачка из ~30 строк скриптов на bbb.retroscene.org:
+ * запись шла больше 5 с, и сторожевой таймер прошивки перезапустил ESP. Поэтому на плате подробная
+ * строка — не чаще раза в 10 с; сколько пропущено — отдельной строкой перед следующей (в ту же
+ * запись). На стенде — все: сценарий ищет их в журнале. */
+/* Отдать ядро, если работаем без передышки 100 мс (ts.h). Сторожевой таймер прошивки следит, чтобы
+ * простой (задача IDLE) шёл на каждом ядре хотя бы раз в 5 с; задача браузера выше её по приоритету,
+ * и 08.11 раскладка страницы bbb.retroscene.org после скриптов (Bootstrap, обтекание и колонки —
+ * разбор одних и тех же кусков по нескольку раз) шла дольше 5 с — ESP перезапустился (Task watchdog,
+ * задача zm-app, след — html.c parse → float_box → flex_item → apply_style). Задержка на 1 мс раз в
+ * 100 мс — 1 % времени. На стенде время ненастоящее (tests/host.c) — там ничего не делает. */
+void ts_yield(void) {
+#ifndef TSAFARI_HOST
+    static uint32_t last;
+    uint32_t now = ts_core->millis();
+    if (now - last < 100u) return;
+    ts_core->delay(1);
+    last = ts_core->millis();
+#endif
+}
+
+#define DETAIL_EVERY_MS 10000u
+int ts_log_quota(void) {
+#ifdef TSAFARI_HOST
+    return 1;
+#else
+    static uint32_t last;
+    static unsigned skipped;
+    static int started;
+    uint32_t now = ts_core->millis();
+    if (started && now - last < DETAIL_EVERY_MS) { skipped++; return 0; }
+    started = 1;
+    last = now;
+    if (skipped) ts_log("tsafari: %u detail lines not logged (flash log)", skipped);
+    skipped = 0;
+    return 1;
+#endif
+}
 
 /* Ошибка, после которой браузер работать не может: записать текст и сообщить Z80. */
 static void fail(const char *text) {
@@ -178,6 +221,19 @@ static int css_card;                     /* … с карты Evo (Cache\CSS, im
 static uint32_t css_began;               /* когда начата — время в журнал */
 static int css_relayout;                 /* таблицы пришли, раскладка с ними ещё впереди */
 static char css_url[URL_MAX];
+/* Скрипты страницы (js.h): страница сначала показывается без них; когда её таблицы стилей пришли,
+ * собирается дерево и список <script>, внешние скрипты грузятся по одной (из памяти css_mem — она
+ * общая с таблицами стилей — или из сети), потом скрипты выполняются в своей задаче, и итог
+ * (HTML после скриптов) раскладывается заново на месте страницы. Пока скрипты собираются и идут,
+ * картинки не грузятся и страница заново не раскладывается: скрипты меняют, какие картинки на
+ * странице, а css.c у раскладки и у скриптов общий. */
+enum { JS_NONE, JS_WANT, JS_LOAD, JS_RUN, JS_CANCEL };
+static int js_phase;
+static int js_hops;                      /* переходов по просьбе скриптов подряд, без действия пользователя */
+static int js_after_cancel;              /* страница пришла, пока скрипты прежней останавливались: её — потом */
+static int js_busy;                      /* грузится внешний скрипт js_url */
+static uint32_t js_began;
+static char js_url[URL_MAX];
 static uint8_t *page_body;               /* тело страницы на экране (для переразметки) */
 static size_t page_len;
 static char page_ct[96];
@@ -188,8 +244,19 @@ static void img_drop(void) {
     img_busy = img_card = img_left = img_rewrite = 0;
 }
 
+/* Скрипты прежней страницы — бросить: идут — попросить остановиться (дерево и память освободит
+ * js_step, когда задача кончится), нет — освободить сразу. */
+static void js_cancel(void) {
+    js_busy = 0;
+    js_after_cancel = 0;
+    if (js_phase == JS_RUN || js_phase == JS_CANCEL) { js_abort(); js_phase = JS_CANCEL; return; }
+    if (js_phase != JS_NONE) js_end();
+    js_phase = JS_NONE;
+}
+
 /* Загрузить адрес как страницу; картинка, если грузилась, — брошена. */
 static void net_go(const char *url) {
+    js_cancel();
     img_drop();
     if (css_busy && css_card) imgcache_read_cancel();
     css_busy = css_card = css_relayout = 0;      /* таблицу стилей, если грузилась, бросает новая загрузка */
@@ -294,7 +361,7 @@ static int show_new_page(void);
 static void css_arrived(const uint8_t *b, size_t n, const char *from) {
     uint32_t t0 = ts_core->millis();
     css_link_done(css_url, b, n);
-    ts_log("tsafari: css %s: %s, %u bytes in %u ms, parse %u ms, %d rules", css_url, from, (unsigned)n,
+    ts_log_detail("tsafari: css %s: %s, %u bytes in %u ms, parse %u ms, %d rules", css_url, from, (unsigned)n,
            (unsigned)(t0 - css_began), (unsigned)(ts_core->millis() - t0), css_rules(1));
     if (!css_links_wanted()) {
         css_relayout = 1;
@@ -394,6 +461,12 @@ static void page_moved(const char *url) {
  * и «обновить» — 0), встроенную страницу показать сразу, остальные — начать загружать. Пока
  * грузится, на экране остаётся прежняя страница, а глобус вращается. */
 static int open_url(const char *url, int push) {
+    /* своя страница (tsafari:…) — без «?…»: кнопка-форма «Help» стартовой страницы шлёт GET */
+    static char clean[URL_MAX];
+    if (url_is_internal(url) && url[strcspn(url, "?#")]) {   /* strpbrk прошивка не даёт */
+        snprintf(clean, sizeof(clean), "%.*s", (int)strcspn(url, "?#"), url);
+        url = clean;
+    }
     frames_abort();
     img_fresh = 0;
     snprintf(current, sizeof(current), "%s", url);
@@ -415,7 +488,12 @@ static int open_url(const char *url, int push) {
         relayout_at = 0;
         image_clear();
         image_layout_begin();
-        if (url_is_internal(url)) { form_clear(); demo_page(); internal_page = 1; }
+        if (url_is_internal(url)) {
+            form_clear();
+            if (!strcmp(url, START_URL)) start_page();   /* поиск DuckDuckGo (start.c) */
+            else demo_page();                           /* помощь — tsafari:about и прочие */
+            internal_page = 1;
+        }
         else { html_error_page(url, "Network is not available", "This ESP firmware has no net_open (ABI 1.2+)."); internal_page = 0; }
         return show_new_page();
     }
@@ -516,7 +594,7 @@ static int frame_done(int st, const fetch_result_t *r) {
             snprintf(f->url, sizeof(f->url), "%s", r->url);   /* после переадресации — откуда пришёл */
             snprintf(f->content_type, sizeof(f->content_type), "%s", r->content_type);
         }
-        ts_log("tsafari: frame %s: %u bytes in %u ms", r->url, (unsigned)r->length, (unsigned)r->took);
+        ts_log_detail("tsafari: frame %s: %u bytes in %u ms", r->url, (unsigned)r->length, (unsigned)r->took);
     }
     return frames_next();
 }
@@ -635,6 +713,19 @@ static int fetch_step(void) {
     fetch_result_t *r = NULL;
     int st = fetch_poll(&r);
     if (st == FETCH_BUSY || st == FETCH_IDLE || !r) return 1;
+    if (js_busy) {                               /* внешний скрипт из сети */
+        js_busy = 0;
+        if (!loading && !img_busy) ui_set_busy(0);
+        int ok_js = st == FETCH_DONE && !r->error[0] && r->length;
+        size_t n = ok_js ? r->length : 0;
+        uint8_t *b = ok_js ? fetch_take_body() : NULL;
+        if (b && n <= 128u * 1024u) {             /* небольшой — и в память на время работы браузера */
+            uint8_t *c = ts_alloc(n);
+            if (c) { memcpy(c, b, n); css_mem_put(js_url, c, n); }
+        }
+        js_script_take(js_url, b, b ? n : 0);    /* сам буфер — скриптам (без второй копии) */
+        return 1;
+    }
     if (css_busy) {                              /* таблица стилей из сети: разобрать в правила (css.c) */
         css_busy = 0;
         if (!loading && !img_busy) ui_set_busy(0);
@@ -660,6 +751,8 @@ static int fetch_step(void) {
         int ok_img = st == FETCH_DONE && !r->error[0] && r->length;
         size_t n = ok_img ? r->length : 0;
         uint8_t *b = ok_img ? fetch_take_body() : NULL;   /* файл — картинке, без копии (image.c) */
+        /* большие — в журнал: откуда пришла (с карты — строка imgcache «read»), сколько шла */
+        if (b && n >= 64u * 1024u) ts_log_detail("tsafari: image %.90s: network, %u KB in %u ms", img_url, (unsigned)(n / 1024u), (unsigned)r->took);
         /* из сети: разобранную картинку image.c запишет в кэш на карте Evo (imgcache.c) */
         int again = img_fresh || img_rewrite;
         img_rewrite = 0;
@@ -711,6 +804,7 @@ static int fetch_step(void) {
     } else {
         uint32_t t0 = ts_core->millis();
         image_clear();
+        html_js_note(HTML_JS_RUNNING);
         html_render(r->body, r->length, r->content_type, r->url);
         ts_log("tsafari: %s: %u bytes in %u ms, layout %u ms, %d px", r->url, (unsigned)r->length,
                (unsigned)r->took, (unsigned)(ts_core->millis() - t0), page_height());
@@ -719,8 +813,113 @@ static int fetch_step(void) {
         page_body = b;
         page_len = r->length;
         snprintf(page_ct, sizeof(page_ct), "%s", r->content_type);
+        if (b && js_phase == JS_NONE) js_phase = JS_WANT;   /* скрипты — когда придут таблицы стилей */
+        else if (b && js_phase == JS_CANCEL) js_after_cancel = 1;   /* прежние ещё останавливаются */
     }
     return show_new_page();
+}
+
+/* Скрипты страницы — шаг главного цикла (см. js_phase): собрать, загрузить внешние, запустить,
+ * взять итог. В журнал: сколько скриптов, время, память движка, ошибки и console.log скриптов. */
+static int relayout(void);
+static int js_step(void) {
+    if (js_phase == JS_CANCEL) {                 /* прежняя страница: дождаться конца задачи */
+        if (!js_finished()) return 1;
+        js_end();
+        /* разбор большого скрипта не прерывается (zxart.ee — 12 с): новая страница успевает прийти,
+         * пока прежние скрипты останавливаются, — её скрипты запустить теперь */
+        js_phase = js_after_cancel && page_body ? JS_WANT : JS_NONE;
+        js_after_cancel = 0;
+        return 1;
+    }
+    if (js_phase == JS_WANT) {
+        if (loading || nx_loading || css_busy || css_relayout || css_links_wanted() || relayout_at || internal_page ||
+            fr_n || !page_body)
+            return 1;
+        js_began = ts_core->millis();
+        int cs = charset_detect(page_ct, page_body, page_len), r;   /* r — как у js_begin (js.h) */
+        if (cs == CS_UTF8) {
+            r = js_begin((const char *)page_body, page_len, shown_url);
+        } else {                                 /* дерево — в UTF-8 (строки JavaScript) */
+            char *u = ts_alloc(page_len * 3 + 1);
+            r = u ? js_begin(u, charset_to_utf8(cs, page_body, page_len, u), shown_url) : -1;
+            if (u) ts_core->free(u);
+        }
+        js_phase = r > 0 ? JS_LOAD : JS_NONE;
+        if (r <= 0 && html_js_shown()) {         /* пустая страница ждала скриптов, а их не запустить */
+            html_js_note(r < 0 ? HTML_JS_MEMORY : HTML_JS_EMPTY);
+            return relayout();
+        }
+        return 1;
+    }
+    if (js_phase == JS_LOAD) {
+        while (!loading && !nx_loading && !img_busy && !css_busy && !js_busy) {
+            const char *u = js_script_next();
+            if (!u) break;
+            snprintf(js_url, sizeof(js_url), "%s", u);
+            size_t n = 0;
+            const uint8_t *m = img_fresh ? NULL : css_mem_get(js_url, &n);
+            if (m) { js_script_body(js_url, m, n); continue; }   /* в памяти — сразу */
+            js_busy = 1;
+            ui_set_busy(1);
+            fetch_start_image(js_url);               /* как картинка: тело — в память */
+        }
+        if (js_busy || js_scripts_wanted()) return 1;
+        ui_set_busy(1);
+        if (js_start(20000)) { js_phase = JS_RUN; return 1; }
+        js_phase = JS_CANCEL;                    /* задача не запустилась (нет памяти) */
+        if (html_js_shown()) { html_js_note(HTML_JS_MEMORY); relayout_at = ts_core->millis() + 1; }
+        return 1;
+    }
+    if (js_phase != JS_RUN || !js_finished()) return 1;
+    if (!loading && !img_busy && !css_busy) ui_set_busy(0);
+    size_t heap, peak, dom;
+    uint32_t ms;
+    int nok, nfail;
+    js_stats(&heap, &peak, &dom, &ms, &nok, &nfail);
+    int lines = 0;
+    for (const char *l; (l = js_log_next()) != NULL;)
+#ifdef TSAFARI_HOST
+        if (++lines) ts_log("tsafari: %s", l);       /* стенд: все строки (сценарий ищет итог проверок) */
+#else
+        if (lines++ < 2) ts_log("tsafari: %s", l);    /* первая ошибка скриптов и где (журнал — во flash, ts_log_quota) */
+#endif
+    int replace = 0;
+    const char *nav = js_nav(&replace);
+    if (nav && js_hops < 3) {                    /* скрипт попросил перейти — перейти (адрес — копия) */
+        char to[URL_MAX];
+        snprintf(to, sizeof(to), "%s", nav);
+        ts_log("tsafari: js navigation to %s", to);
+        js_end();
+        js_phase = JS_NONE;
+        js_hops++;
+        if (replace && hist_n) {                 /* replace: та же запись истории, адрес — новый */
+            history_drop(hist_at);
+            snprintf(history[hist_at].url, URL_MAX, "%s", to);
+            return open_url(to, 0);
+        }
+        return open_url(to, 1);
+    }
+    if (nav) ts_log("tsafari: js navigation to %s ignored (3 in a row)", nav);
+    size_t n = 0;
+    char *html = js_changed() ? js_result(&n) : NULL;
+    int note = js_out_of_memory() ? HTML_JS_MEMORY : nfail ? HTML_JS_ERRORS : HTML_JS_EMPTY;
+    ts_log("tsafari: js %d scripts ok, %d failed, %u ms (all %u ms), heap %u KB (peak %u), dom %u KB, %s", nok, nfail,
+           (unsigned)ms, (unsigned)(ts_core->millis() - js_began), (unsigned)(heap / 1024), (unsigned)(peak / 1024),
+           (unsigned)(dom / 1024), html ? "page changed" : "page as is");
+    js_end();
+    js_phase = JS_NONE;
+    if (!html) {                                 /* страница не изменилась: если она пустая (её строят */
+        if (!html_js_shown()) return 1;          /* скрипты) — сказать, что вышло со скриптами */
+        html_js_note(note);
+        return relayout();
+    }
+    html_js_note(note);                          /* итог тоже пустой — будет сказано, почему */
+    if (page_body) ts_core->free(page_body);      /* дальше страница — это итог скриптов */
+    page_body = (uint8_t *)html;
+    page_len = n;
+    snprintf(page_ct, sizeof(page_ct), "text/html; charset=utf-8");
+    return relayout();
 }
 
 /* Разложить страницу на экране заново (пришла картинка, чей размер в HTML не был задан): та же
@@ -742,7 +941,7 @@ static int relayout(void) {
     /* долгая раскладка — в журнал (короткие — нет: журнал пишется во флеш, раскладка заново — на
      * каждую пришедшую картинку) */
     uint32_t took = ts_core->millis() - t0;
-    if (took >= 300) ts_log("tsafari: relayout %u ms, %d px", (unsigned)took, page_height());
+    if (took >= 300) ts_log_detail("tsafari: relayout %u ms, %d px", (unsigned)took, page_height());
 #ifdef TSAFARI_HOST
     {
         extern size_t html_host_parsed;
@@ -810,7 +1009,7 @@ static int browser_init(void) {
     html_set_visited(is_visited);
     if (!net_ready) ts_log("tsafari: no net_open in this firmware: pages cannot be loaded");
     hist_n = hist_at = 0; loading = 0;
-    if (!open_url("tsafari:about", 1)) { fail("PAGE UPLOAD FAILED"); return 0; }
+    if (!open_url(START_URL, 1)) { fail("PAGE UPLOAD FAILED"); return 0; }
     uint32_t now = ts_core->millis();
     wifi_ok = wifi_failed = 0; wifi_since = now; wifi_poll_at = now - 1000;
     ui_set_busy(1);
@@ -854,7 +1053,8 @@ static int browser_step(uint32_t now) {
         if (fr_act == FORM_SUBMIT) submit = 1;
         int link = fr_act == FORM_NONE ? page_link_at(cx, cy) : -1;
         if (link >= 0) {
-            if (internal_page) target = demo_section_y(link);
+            if (internal_page && !strcmp(current, HELP_URL)) target = demo_section_y(link);   /* разделы помощи */
+            else if (internal_page) { /* у стартовой ссылок нет */ }
             else if (!follow_link(link)) { fail("PAGE UPLOAD FAILED"); return -1; }
         }
     }
@@ -881,14 +1081,15 @@ static int browser_step(uint32_t now) {
         case KEY_F5: act = UI_RELOAD; break;
         case KEY_ESC: act = UI_STOP; break;
         case KEY_BACKSPACE: act = UI_BACK; break;
-        case KEY_LEFT: if (ev.mods & MOD_ALT) act = UI_BACK; break;
-        case KEY_RIGHT: if (ev.mods & MOD_ALT) act = UI_FORWARD; break;
+        case KEY_LEFT: if (ev.mods & (MOD_ALT | MOD_CTRL)) act = UI_BACK; break;      /* Alt или Ctrl + ← */
+        case KEY_RIGHT: if (ev.mods & (MOD_ALT | MOD_CTRL)) act = UI_FORWARD; break;  /* Alt или Ctrl + → */
         case KEY_F12: __atomic_store_n(&state, ST_EXIT, __ATOMIC_RELEASE); return -1;
         default: break;
         }
     }
     /* действие пользователя (кнопкой или клавишей) */
     int ok = 1;
+    if (act != UI_NONE || pressed) js_hops = 0;        /* переходы скриптов снова можно (см. js_step) */
     if (act == UI_GO) {
         char url[URL_MAX];
         if (url_from_input(ui_url(), url, sizeof(url))) ok = open_url(url, 1);
@@ -896,6 +1097,7 @@ static int browser_step(uint32_t now) {
     } else if (act == UI_RELOAD) {
         ok = reload();
     } else if (act == UI_STOP) {
+        if (js_phase != JS_NONE && js_phase != JS_CANCEL) js_cancel();   /* стоп — и скрипты страницы */
         if (loading) fetch_cancel();
         else if (img_busy && img_card) {                /* стоп — картинки больше не грузить */
             imgcache_read_cancel();
@@ -996,9 +1198,11 @@ static int browser_step(uint32_t now) {
         css_card = !img_fresh && imgcache_css_read_start(css_url);
         if (!css_card) fetch_start_image(css_url);   /* как картинка: тело — в память, не файлом на карту */
     }
+    if (ok) ok = js_step();
     /* картинки страницы — по одной, когда страница уже на экране (сначала видимые) и её таблицы
-     * стилей пришли и разложены */
-    if (ok && !loading && !nx_loading && !img_busy && !css_busy && !css_relayout && !css_links_wanted() && !ui_wifi_open()) {
+     * стилей пришли и разложены, а скрипты выполнены */
+    if (ok && !loading && !nx_loading && !img_busy && !css_busy && !css_relayout && !css_links_wanted() &&
+        (js_phase == JS_NONE || js_phase == JS_CANCEL) && !ui_wifi_open()) {
         const char *u = image_next(page_top());
         if (u && !strncmp(u, "data:", 5)) {      /* картинка data: — байты уже в странице (html.c) */
             size_t dn = 0;
@@ -1015,7 +1219,8 @@ static int browser_step(uint32_t now) {
         }
     }
     int relaid = 0;
-    if (ok && relayout_at && (int32_t)(now - relayout_at) >= 0 && !loading && !nx_loading) {
+    if (ok && relayout_at && (int32_t)(now - relayout_at) >= 0 && !loading && !nx_loading && js_phase != JS_RUN &&
+        js_phase != JS_CANCEL) {
         relayout_at = 0;
         css_relayout = 0;
         ok = relayout();

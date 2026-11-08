@@ -59,6 +59,8 @@ typedef struct {
     int height;                  /* высота из CSS в точках; до 24 — «маленькое» поле мелким шрифтом */
     uint32_t fill, ink;          /* фон и цвет текста из CSS (0xRRGGBB); 0 — по дизайну */
     int no_border;               /* CSS border: 0 / none — без рамки */
+    int no_fill;                 /* CSS background: transparent / none — без своего фона (видна страница) */
+    int empty_label;             /* <input type=submit value=""> — подпись пустая (не «Submit») */
 } form_new_t;
 
 /* Что отправить (итог FORM_SUBMIT). */

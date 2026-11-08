@@ -51,6 +51,7 @@ typedef struct {
                                           * flex, самого плавающего (doc_frame_push) — только свои (в CSS
                                           * это отдельный «контекст», BFC); у коробки блока — как у родителя */
     int css_item, css_y, css_h, css_mb, css_pb, css_bw;   /* её фон, верх, наименьшая высота, низ */
+    int css_x, css_w, css_bt, css_bl, css_br;          /* левый край и ширина по внешнему краю; рамка */
 } frame_t;
 
 static frame_t fs[MAX_FRAMES];
@@ -75,6 +76,16 @@ static struct { int w, h, desc, id; } inl[MAX_INLINE];
 static unsigned inl_n;
 static void (*inline_place)(int id, int x, int y);
 static uint16_t space_glyph;
+/* Сколько раз на страницу лёг видимый текст (не одни пробелы): по нему видно, есть ли в коробке
+ * текст (фон-картинка CSS рисуется поверх страницы и закрыла бы его — doc_text_count). */
+static unsigned text_n;
+static void count_text(const uint16_t *c, unsigned n) {
+    for (unsigned k = 0; k < n; k++) if (c[k] != space_glyph) { text_n++; return; }
+}
+unsigned doc_text_count(void) { return text_n; }
+/* Последняя закрытая коробка CSS: внутри рамки (padding-box) — doc_last_box */
+static int lb_x, lb_y, lb_w, lb_h;
+void doc_last_box(int *x, int *y, int *w, int *h) { *x = lb_x; *y = lb_y; *w = lb_w; *h = lb_h; }
 
 void doc_begin(uint32_t bg) {
     page_begin(bg);
@@ -208,9 +219,30 @@ static void emit_line(unsigned from, unsigned to, int left, int avail) {
         while (j < to && cells[j] != DOC_INLINE && cell_style[j] == cell_style[i]) j++;
         const doc_style_t *s = &styles[cell_style[i]];
         const font_face_t *f = &font_faces[s->face];
-        if (s->bg) page_rect(x, F->y, (int)(j - i) * f->w, asc + desc, s->bg);   /* свой фон под текстом */
-        page_text(x, F->y + asc - f->baseline, s->face, cells + i, j - i, s->fg, s->bg ? s->bg : current_bg(),
-                  s->flags & ~DOC_NOWRAP, s->link);
+        unsigned show = j - i;
+        /* overflow: hidden — буквы правее края места не видны; text-overflow: ellipsis — последняя
+         * влезшая буква заменяется на «…» (заголовки результатов поиска в одну строку) */
+        if ((s->flags & DOC_CLIP) && x + (int)show * f->w > left + avail) {
+            int fit = (left + avail - x) / f->w;
+            show = fit > 0 ? (unsigned)fit : 0;
+            if (show && (s->flags & DOC_ELLIPSIS)) {
+                static uint16_t buf[256];
+                if (show > sizeof(buf) / sizeof(buf[0])) show = sizeof(buf) / sizeof(buf[0]);
+                memcpy(buf, cells + i, show * sizeof(buf[0]));
+                buf[show - 1] = (uint16_t)font_lookup(0x2026);
+                if (s->bg) page_rect(x, F->y, (int)show * f->w, asc + desc, s->bg);
+                count_text(buf, show);
+                page_text(x, F->y + asc - f->baseline, s->face, buf, show, s->fg, s->bg ? s->bg : current_bg(),
+                          s->flags & ~(DOC_NOWRAP | DOC_CLIP | DOC_ELLIPSIS), s->link);
+                x += (int)(j - i) * f->w;
+                i = j;
+                continue;
+            }
+        }
+        if (s->bg) page_rect(x, F->y, (int)show * f->w, asc + desc, s->bg);   /* свой фон под текстом */
+        if (show) count_text(cells + i, show);
+        if (show) page_text(x, F->y + asc - f->baseline, s->face, cells + i, show, s->fg, s->bg ? s->bg : current_bg(),
+                            s->flags & ~(DOC_NOWRAP | DOC_CLIP | DOC_ELLIPSIS), s->link);
         x += (int)(j - i) * f->w;
         i = j;
     }
@@ -220,13 +252,15 @@ static void emit_line(unsigned from, unsigned to, int left, int avail) {
 /* Измерение абзаца: самое длинное неразрывное и вся длина без переносов (+ отступ и поля). */
 /* Клетка без переноса (white-space: nowrap): пробел в ней — не место переноса. */
 static int nowrap(unsigned i) { return cells[i] != DOC_INLINE && (styles[cell_style[i]].flags & DOC_NOWRAP); }
+/* Клетка, которую обрежут (nowrap с overflow: hidden): в мерке — как обычный текст */
+static int clipped(unsigned i) { return cells[i] != DOC_INLINE && (styles[cell_style[i]].flags & DOC_CLIP); }
 
 static void measure_para(void) {
     ms[mn - 1].frun = 0;                                  /* текст — ряд плавающих кончился */
     int total = 0, word = 0, best = 0;
     for (unsigned i = 0; i < cell_n; i++) {
         int w = cell_w(i);
-        if (cells[i] == space_glyph && !nowrap(i)) { word = 0; total += w; continue; }
+        if (cells[i] == space_glyph && (!nowrap(i) || clipped(i))) { word = 0; total += w; continue; }
         if (cells[i] == DOC_INLINE) word = 0;
         word += w;
         total += w;
@@ -442,6 +476,9 @@ int doc_cssbox_begin(const doc_box_t *b) {
     F->css_mb = b->mb;
     F->css_pb = b->pb;
     F->css_bw = b->bb;                                /* рамка снизу */
+    F->css_x = left;
+    F->css_w = outer;
+    F->css_bt = b->bt; F->css_bl = b->bl; F->css_br = b->br;
     F->fl_mark = fl_n;
     F->fl_base = fs[fn - 2].fl_base;
     return 1;
@@ -462,6 +499,10 @@ void doc_cssbox_end(void) {
     int h = F->y + F->css_pb + F->css_bw - F->css_y;
     if (h < F->css_h) h = F->css_h;
     if (F->css_item >= 0) page_rect_height(F->css_item, h);
+    lb_x = F->css_x + F->css_bl;                      /* внутри рамки: фон-картинка её не закрывает */
+    lb_y = F->css_y + F->css_bt;
+    lb_w = F->css_w - F->css_bl - F->css_br;
+    lb_h = h - F->css_bt - F->css_bw;
     int bottom = F->css_y + h, mb = F->css_mb;
     fn--;
     F->y = bottom;

@@ -1,14 +1,14 @@
 {
   "TSAFARI.ELF": {
-    "bytes": 560480,
-    "sha256": "1e1d13e57ea31d965131e6fbc0812c05d34861f38c592426781d881c86956ae6"
+    "bytes": 1327948,
+    "sha256": "8c25bb70f9016aa90153356f7534ee1c4e73bbfe13cb809c99b01a8247f7f41c"
   },
   "TSAFARI.FNT": {
     "bytes": 3580809,
     "sha256": "998c510c70ea3cba019b69d12829aef8313ec3dcfc20725544d423ac933381b3"
   },
   "TSAFARI.SPG": {
-    "bytes": 100864,
-    "sha256": "2ef3be1d251b978cea80c7ab48d2bfbc64ffcdbab4a1605ca295a12fd9b23303"
+    "bytes": 101376,
+    "sha256": "7856a8b38e72b9d216ce12ecbd1cc1061d20567b7db0123255d054274bbe6e77"
   }
 }

@@ -74,7 +74,25 @@ static void *c_realloc(void *p, size_t n) {
     q->n = n;
     return q + 1;
 }
-static void c_log(const char *f, ...) { va_list a; va_start(a, f); printf("  log: "); vprintf(f, a); printf("\n"); va_end(a); }
+/* Журнал: на экран и в log_buf (с log_mark — сценарий ищет в нём строки, например итог скриптов) */
+static char log_buf[16384];
+static size_t log_mark;
+static void c_log(const char *f, ...) {
+    va_list a;
+    va_start(a, f);
+    printf("  log: ");
+    vprintf(f, a);
+    printf("\n");
+    va_end(a);
+    va_start(a, f);
+    if (log_mark < sizeof(log_buf) - 2) {
+        int k = vsnprintf(log_buf + log_mark, sizeof(log_buf) - log_mark - 1, f, a);
+        if (k > 0) log_mark += (size_t)k < sizeof(log_buf) - log_mark - 1 ? (size_t)k : sizeof(log_buf) - log_mark - 1;
+        log_buf[log_mark++] = '\n';
+        log_buf[log_mark] = 0;
+    }
+    va_end(a);
+}
 static uint32_t c_millis(void) { return now_ms; }
 static void c_delay(uint32_t ms) { now_ms += ms; }
 static void *c_mutex(void) { static int m; return &m; }
@@ -192,7 +210,10 @@ static void *c_net_open(const char *url, const char *extra, uint32_t t, int *sta
      * спрошенная по набранному адресу, — 404. */
     char final[600];
     snprintf(final, sizeof(final), "%s", url);
-    if (!strstr(url, ".htm") && !strstr(url, ".css")) net_images++;
+    if (!strstr(url, ".htm") && !strstr(url, ".css") && !strstr(url, ".js")) {
+        net_images++;
+        if (getenv("TSAFARI_NETLOG")) printf("  net image %s\n", url);   /* стенд: какие картинки шли из сети */
+    }
     if (strstr(url, ".css")) net_css++;
     if (!strncmp(url + strlen(host), "old/", 4)) {
         if (strstr(url, ".png")) moved_old++;
@@ -306,6 +327,10 @@ static void key_press(uint8_t code, int ext) {
     if (ext) b[n++] = 0xE0;
     b[n++] = 0xF0; b[n++] = code;
     key_bytes(b, n);
+}
+static void ctrl_press(uint8_t code) {
+    const uint8_t b[] = {0x14, 0xE0, code, 0xE0, 0xF0, code, 0xF0, 0x14};
+    key_bytes(b, sizeof(b));
 }
 static void type_text(const char *s) {
     static const char *const map = "a\x1C" "b\x32" "c\x21" "d\x23" "e\x24" "f\x2B" "g\x34" "h\x33" "i\x43" "j\x3B"
@@ -586,6 +611,9 @@ int page_top(void);
 void image_host_stats(int top, int *seen, int *ready, int *failed, uint32_t *used);
 int image_host_size(const char *tail, int *w, int *h);
 int image_host_rect(const char *tail, int *x, int *y, int *w, int *h);
+const char *html_title(void);                    /* html.c: заголовок страницы на экране */
+int image_host_info(const char *tail, int *state, int *dw, int *dh, int *fmt);   /* image.c */
+int page_height(void);                           /* page.c: высота страницы на экране */
 
 /* Сводка картинок видимой части — строкой в вывод стенда. */
 static void image_stats_line(const char *name) {
@@ -761,6 +789,42 @@ int main(int argc, char **argv) {
     ok &= run(21000); snapshot("02_wifi_failed");
     wifi_up = 1;
     ok &= run(400);   snapshot("03_page");
+    /* стартовая страница (08.11): поиск DuckDuckGo. «Help» (кнопка 2) — страница помощи tsafari:about
+     * (длинная: выше экрана), «назад» — снова поиск; запрос из поля (кнопка 0) — GET на
+     * html.duckduckgo.com (в журнале «form GET …») */
+    {
+        int start_h = page_height();
+        ok &= click_control(2);
+        ok &= run(600);   snapshot("03b_help");
+        int help_h = page_height();
+        key_press(0x66, 0);                           /* Backspace — назад */
+        ok &= run(600);
+        int back_h = page_height();
+        ctrl_press(0x74);                             /* Ctrl+→ — вперёд: снова помощь */
+        ok &= run(600);
+        int fwd_h = page_height();
+        ctrl_press(0x6B);                             /* Ctrl+← — назад: снова поиск */
+        ok &= run(600);
+        int back2_h = page_height();
+        if (fwd_h != help_h || back2_h != start_h) {
+            printf("ctrl arrows: forward %d (want %d), back %d (want %d)\n", fwd_h, help_h, back2_h, start_h);
+            ok = 0;
+        } else {
+            puts("ctrl arrows ok");
+        }
+        log_mark = 0;
+        ok &= click_control(0);
+        type_text("zx evolution");
+        key_press(0x5A, 0);
+        ok &= run(600);
+        if (help_h <= 1000 || back_h != start_h || !strstr(log_buf, "form GET https://html.duckduckgo.com/html/?q=zx+evolution")) {
+            printf("start page: heights start %d help %d back %d, search %s\n", start_h, help_h, back_h,
+                   strstr(log_buf, "html.duckduckgo.com/html/?q=") ? "sent" : "not sent");
+            ok = 0;
+        } else {
+            puts("start page ok");
+        }
+    }
     goal_x = 2; goal_y = 2;
     ok &= run(700);   snapshot("04_nav_open");
     key_press(0x1F, 1);                               /* Win */
@@ -768,6 +832,12 @@ int main(int argc, char **argv) {
     type_text("zx.example.com/tsafari");
     ok &= run(300);   snapshot("05_address");
     key_press(0x76, 0);                               /* Esc */
+    /* прокрутка — на странице помощи (стартовая — поиск DuckDuckGo, короткая): адрес tsafari:about */
+    key_press(0x1F, 1);
+    ok &= run(300);
+    type_text("tsafari:about");
+    key_press(0x5A, 0);
+    ok &= run(600);
     goal_x = 560; goal_y = 420;
     ok &= run(1500);
     wheel = (uint8_t)((wheel + 2) & 15);              /* два щелчка к себе (PS/2: +1 за щелчок) — вниз */
@@ -864,6 +934,74 @@ int main(int argc, char **argv) {
             printf("css again from memory ok, %d style sheets on card\n", files);
         }
     }
+    /* JavaScript (08.11): страница js.html проверяет сама себя (дерево, селекторы, события, таймеры,
+     * document.write, getComputedStyle…) и пишет в журнал «JS-CHECK-DONE верных/всего»; итог
+     * скриптов — строкой на странице (снимок 13g) */
+    {
+        log_mark = 0;
+        key_press(0x1F, 1);
+        ok &= run(300);
+        type_text("test.local/js.html");
+        key_press(0x5A, 0);
+        ok &= run(1500);  snapshot("13g_js");
+        const char *d = strstr(log_buf, "JS-CHECK-DONE ");
+        int good = 0, all = -1;
+        if (d) sscanf(d + 14, "%d/%d", &good, &all);
+        if (good != all) {
+            printf("js checks: %d of %d (want all)\n", good, all);
+            ok = 0;
+        } else {
+            printf("js checks ok, %d of %d\n", good, all);
+        }
+        /* страницу строит скрипт: пока скрипты идут — страница как есть (пустая, её заголовок «Пусто»),
+         * «This page needs JavaScript» не появляется ни на шаг; потом — построенная (заголовок от скрипта) */
+        key_press(0x1F, 1);
+        ok &= run(300);
+        type_text("test.local/jsapp.html");
+        key_press(0x5A, 0);
+        int js_note_steps = 0, empty_steps = 0;
+        for (int k = 0; k < 150; k++) {
+            ok &= run(10);
+            if (!strcmp(html_title(), "This page needs JavaScript")) js_note_steps++;
+            if (!strcmp(html_title(), "Пусто")) empty_steps++;
+        }
+        snapshot("13h_jsapp");
+        if (strcmp(html_title(), "Built by JS") || js_note_steps) {
+            printf("js app: title '%s' (want 'Built by JS'), 'needs JavaScript' shown %d steps\n", html_title(), js_note_steps);
+            ok = 0;
+        } else {
+            printf("js app ok (empty page %d steps, no JavaScript note)\n", empty_steps);
+        }
+        /* скрипту не хватает памяти: пустая страница сменяется «нужен JavaScript» с этой причиной */
+        log_mark = 0;
+        key_press(0x1F, 1);
+        ok &= run(300);
+        type_text("test.local/jsbig.html");
+        key_press(0x5A, 0);
+        ok &= run(3000);  snapshot("13i_jsbig");
+        if (strcmp(html_title(), "This page needs JavaScript") || !strstr(log_buf, "out of memory")) {
+            printf("js big: title '%s', out of memory %s\n", html_title(), strstr(log_buf, "out of memory") ? "seen" : "not seen");
+            ok = 0;
+        } else {
+            puts("js big: memory limit ok");
+        }
+        /* скрипт переходит сам (location.replace на js.html): браузер открывает её, её проверки — снова все */
+        log_mark = 0;
+        key_press(0x1F, 1);
+        ok &= run(300);
+        type_text("test.local/jsnav.html");
+        key_press(0x5A, 0);
+        ok &= run(3000);
+        d = strstr(log_buf, "JS-CHECK-DONE ");
+        good = 0, all = -1;
+        if (d) sscanf(d + 14, "%d/%d", &good, &all);
+        if (!strstr(log_buf, "js navigation to https://test.local/js.html") || good != all) {
+            printf("js navigation: %s, checks %d of %d\n", strstr(log_buf, "js navigation to") ? "seen" : "not seen", good, all);
+            ok = 0;
+        } else {
+            puts("js navigation ok");
+        }
+    }
     /* формы: поле (набор и Enter — GET), флажок, переключатель, список, многострочное поле,
      * кнопка (POST по HTTP через сокет), POST по HTTPS — ошибка с объяснением */
     key_press(0x1F, 1);
@@ -909,6 +1047,51 @@ int main(int argc, char **argv) {
     ok &= run(4000);  snapshot("20b_images");
     key_press(0x7A, 1);                               /* PgDn */
     ok &= run(1200);  snapshot("20c_images_pgdn");
+    /* значки ICO (tests/make_ico.py): BMP 32, 24, 4 бита, старый 32 бита с прозрачностью в маске,
+     * PNG внутри. Место 16 × 16 — точки 16 × 16 (у a32 внутри и 16, и 32: берётся 16); без размера —
+     * самая большая (32 × 32); с прозрачностью — ARGB4 (6), без — RGB565 (7); PNG разбирает BL616 */
+    key_press(0x1F, 1);
+    ok &= run(300);
+    type_text("test.local/ico.html");
+    key_press(0x5A, 0);
+    ok &= run(3000);  snapshot("20d_ico");
+    {
+        static const struct { const char *tail; int w, h, fmt; } want[] = {
+            {"ico/a32.ico", 16, 16, 6}, {"ico/a32b.ico", 32, 32, 6}, {"ico/p4.ico", 16, 16, 6},
+            {"ico/rgb24.ico", 16, 16, 7}, {"ico/old32.ico", 16, 16, 6}, {"ico/png.ico", 0, 0, -1}};
+        int good = 1;
+        for (unsigned k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+            int st = -1, dw = 0, dh = 0, fmt = -1;
+            int found = image_host_info(want[k].tail, &st, &dw, &dh, &fmt);
+            if (!found || st != 2 || (want[k].w && (dw != want[k].w || dh != want[k].h)) ||
+                (want[k].fmt >= 0 && fmt != want[k].fmt)) {
+                printf("ico %s: %s, state %d, %dx%d, format %d\n", want[k].tail, found ? "found" : "not found", st, dw, dh, fmt);
+                good = 0;
+            }
+        }
+        if (good) puts("ico ok");
+        else ok = 0;
+    }
+    /* фон-картинки CSS (tests/pages/bg.html): пустой блок с картинкой «200px auto» по середине,
+     * cover из сокращения background, адрес из внешней таблицы — от неё (../rgba.png), а в блоке с
+     * текстом картинка не грузится (рисуется поверх страницы — закрыла бы текст) */
+    key_press(0x1F, 1);
+    ok &= run(300);
+    type_text("test.local/bg.html");
+    key_press(0x5A, 0);
+    ok &= run(3000);  snapshot("20e_bg");
+    {
+        static const char *const ready[] = {"/photo.jpg", "/wide.jpg", "/rgba.png"};
+        int good = 1, st, dw, dh, fmt;
+        for (unsigned k = 0; k < 3; k++)
+            if (!image_host_info(ready[k], &st, &dw, &dh, &fmt) || st != 2) {
+                printf("bg %s: not ready (state %d)\n", ready[k], image_host_info(ready[k], &st, &dw, &dh, &fmt) ? st : -1);
+                good = 0;
+            }
+        if (image_host_info("/gray.png", &st, &dw, &dh, &fmt) && st == 2) { puts("bg gray.png: loaded under text"); good = 0; }
+        if (good) puts("bg ok");
+        else ok = 0;
+    }
     /* переадресация (как google.com → www.google.com): картинка «logo.png» — с нового адреса,
      * в строке адреса — новый адрес */
     key_press(0x1F, 1);

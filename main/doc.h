@@ -28,6 +28,8 @@
 enum { DOC_LEFT, DOC_CENTER, DOC_RIGHT };
 
 #define DOC_NOWRAP 0x80u        /* флаг стиля: white-space: nowrap — здесь строку не переносить */
+#define DOC_CLIP 0x40u          /* overflow: hidden — что не влезло в строку, не видно (с nowrap) */
+#define DOC_ELLIPSIS 0x20u      /* text-overflow: ellipsis — на месте обрезанного «…» */
 typedef struct {
     uint32_t fg;             /* цвет букв 0xRRGGBB */
     uint32_t bg;             /* цвет фона под буквами; 0 — фон страницы, блока или ячейки */
@@ -93,6 +95,11 @@ typedef struct {
 int doc_cssbox_begin(const doc_box_t *b);
 /* Закрыть коробку: высота — по содержимому (не меньше height), дальше — margin снизу. */
 void doc_cssbox_end(void);
+/* Последняя закрытая коробка: прямоугольник внутри её рамки (там рисуется фон-картинка). */
+void doc_last_box(int *x, int *y, int *w, int *h);
+/* Сколько раз на страницу ложился видимый текст: не изменилось между открытием и закрытием
+ * коробки — текста в ней нет. */
+unsigned doc_text_count(void);
 /* Где сейчас низ (куда ляжет следующая строка), в точках. */
 int doc_y(void);
 /* Место для содержимого здесь: левый край, верх (с отложенным промежутком), ширина. */

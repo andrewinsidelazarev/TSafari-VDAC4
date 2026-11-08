@@ -278,7 +278,7 @@ static void op_finish(void) {
             writes++;
             /* скорость записи через программу Z80 на плате ещё не мерили — в журнал; только крупные:
              * журнал пишется во флеш, строка на каждый значок останавливала бы кэши ESP32 */
-            if (op.size >= 65536u) ts_log("tsafari: image cache: %s written, %u KB in %u ms", op.name, (unsigned)(op.size / 1024u),
+            if (op.size >= 65536u) ts_log_detail("tsafari: image cache: %s written, %u KB in %u ms", op.name, (unsigned)(op.size / 1024u),
                    (unsigned)(ts_core->millis() - op.began));
         } else if (op.code == 0x10 || op.code == 0x22) {     /* на карте нет места (download.c) */
             off = 1;
@@ -500,15 +500,15 @@ int imgcache_read_poll(uint8_t **body, size_t *len, int *kind) {
         reads++;
         /* код доклада «сделано» — сколько раз Z80 ждал места в очереди ESP (imgcache.asm) */
         if (n >= 65536u)
-            ts_log("tsafari: image cache: %s read, %u KB in %u ms (%u pieces, gap max %u ms, Z80 waits %u)", op.name,
+            ts_log_detail("tsafari: image cache: %s read, %u KB in %u ms (%u pieces, gap max %u ms, Z80 waits %u)", op.name,
                    (unsigned)(n / 1024u), (unsigned)took, pieces, gap, (unsigned)code);
         return 1;
     }
     /* Не вышло: файл — прочь из учёта (картинка придёт из сети и запишется заново, заменив его) */
     int i = find_key(op.key, op.css);
     if (i >= 0) drop_entry(i);
-    if (!ok) ts_log("tsafari: image cache: %s not read (code %02X)", op.name, code);
-    else ts_log("tsafari: image cache: %s is another image or damaged", op.name);
+    if (!ok) ts_log_detail("tsafari: image cache: %s not read (code %02X)", op.name, code);
+    else ts_log_detail("tsafari: image cache: %s is another image or damaged", op.name);
     if (d) ts_core->free(d);
     return -1;
 }

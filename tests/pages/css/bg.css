@@ -1,0 +1,2 @@
+/* Фон-картинки (стенд «фон-картинки»): адрес в url() — от этой таблицы (../rgba.png → /rgba.png) */
+.ext { width: 120px; height: 80px; background-image: url(../rgba.png); background-repeat: no-repeat; }

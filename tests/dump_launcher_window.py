@@ -1,5 +1,6 @@
 """Окно запуска, как его отправила программа Z80 на модели (tests/test_launcher.py), — в снимки для
-стенда ядра Slot1 (tests/render_host.py): RAM_G 2 МБ и листы поиска и запуска."""
+стенда ядра Slot1 (tests/render_host.py): RAM_G 2 МБ и листы поиска, запуска и середины передачи
+ELF (полоса заполнена наполовину)."""
 from pathlib import Path
 import struct, sys
 
@@ -10,6 +11,7 @@ out = Path(sys.argv[1] if len(sys.argv) > 1 else r"E:\zx\cache\tmp\tsafari\host\
 t.setUpModule()
 esp = t.Esp(exit_after=3)
 m = t.Machine(t.disk_image(), esp)
+m.ft.frame_step = 6                     # лист меняется на каждом FtTick — видна середина передачи
 m.run()
 ramg = bytearray(0x200000)
 for a, v in m.ft.mem.items():
@@ -17,6 +19,8 @@ for a, v in m.ft.mem.items():
         ramg[a] = v
 picked = {"01_search": next(dl for st, dl in m.ft.dls if st == 5),
           "02_start": [dl for st, dl in m.ft.dls if st >= 6][-1]}
+upload = [dl for st, dl in m.ft.dls if st == 8 and len(dl) > 60]
+picked["03_upload"] = upload[len(upload) // 2]
 for name, dl in picked.items():
     d = out / name
     d.mkdir(parents=True, exist_ok=True)

@@ -9,6 +9,8 @@ $python=Join-Path $env:IDF_PYTHON_ENV_PATH 'Scripts\python.exe'
 $tools='E:\zx\esp\pio-venv\Scripts\python.exe'            # Pillow — для шрифтов
 New-Item -ItemType Directory -Force dist/TSAFARI, build | Out-Null
 if (-not $SkipEsp) {
+    & $tools tools/gen_js_prelude.py
+    if($LASTEXITCODE) { throw 'JS prelude failed' }
     & $tools tools/gen_font.py
     if($LASTEXITCODE) { throw 'Font atlas failed' }
     & $tools tools/gen_ui.py

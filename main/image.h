@@ -39,6 +39,19 @@ int image_add(const char *url, const char *alt, int attr_w, int attr_h, int max_
               int *w, int *h);
 /* Строка с местом id легла на страницу: левый верхний угол (x, y), фон под ним bg. */
 void image_place(int id, int x, int y, uint32_t bg);
+/* Фон-картинка коробки CSS (background-image): как её уложить в коробку. */
+typedef struct {
+    uint8_t size;                        /* background-size: 'a' auto, 'c' cover, 'n' contain, 'l' — w × h */
+    uint8_t wp, hp, xp, yp;              /* w, h, x, y — проценты (иначе точки) */
+    int w, h;                            /* размер при 'l'; −1 — auto */
+    int x, y;                            /* background-position: где картинка в коробке */
+} image_bg_t;
+/* Место фона-картинки (прямоугольник — потом, image_back_set): заводится, когда коробка
+ * открывается, — раньше картинок внутри неё, поэтому рисуется под ними. Номер места или −1. */
+int image_back_add(const char *url, const image_bg_t *bg);
+/* Коробка закрылась: прямоугольник внутри рамки. В коробке есть текст — фон-картинку не рисовать
+ * (картинки ложатся поверх страницы и закрыли бы его; остаётся цвет фона). */
+void image_back_set(int id, int x, int y, int w, int h, int has_text);
 /* Заглушка места id в странице (зовёт page.c при отрисовке строк). */
 void image_paint(int id, int x, int y, int w, int h, uint32_t bg);
 /* Готовые картинки видимой части (top — прокрутка) — в дисплей-лист поверх страницы. */
